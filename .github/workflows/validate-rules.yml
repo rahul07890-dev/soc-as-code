@@ -13,44 +13,45 @@ on:
 jobs:
   validate-rules:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
-      
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      
+
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-      
+
       - name: Detect changed rules
         id: changed-rules
         run: |
-          git diff --name-only HEAD~1 HEAD > changed_files.txt
+          # list changed files between last two commits (works for push)
+          git diff --name-only HEAD~1 HEAD > changed_files.txt || true
           echo "Changed files:"
-          cat changed_files.txt
-          
-          # Extract changed Sigma rules
-          SIGMA_RULES=$(grep "^rules/sigma/.*\\.ya?ml$" changed_files.txt | tr '\n' ',' || echo "")
+          cat changed_files.txt || true
+
+          # Extract changed Sigma rules (.yml or .yaml)
+          SIGMA_RULES=$(grep -E "^rules/sigma/.*\.(yml|yaml)$" changed_files.txt | tr '\n' ',' || echo "")
           echo "sigma_rules=${SIGMA_RULES}" >> $GITHUB_OUTPUT
-          
-          # Extract changed YARA rules
-          YARA_RULES=$(grep "^rules/yara/.*\\.yara?$" changed_files.txt | tr '\n' ',' || echo "")
+
+          # Extract changed YARA rules (.yara or .yar)
+          YARA_RULES=$(grep -E "^rules/yara/.*\.(yara|yar)$" changed_files.txt | tr '\n' ',' || echo "")
           echo "yara_rules=${YARA_RULES}" >> $GITHUB_OUTPUT
-          
+
           # Check if any rules changed
           if [ -z "$SIGMA_RULES" ] && [ -z "$YARA_RULES" ]; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
           else
             echo "has_changes=true" >> $GITHUB_OUTPUT
           fi
-      
+
       - name: Generate test logs and validate rules
         if: steps.changed-rules.outputs.has_changes == 'true'
         run: |
@@ -60,20 +61,20 @@ jobs:
             --output-dir validation_results
         env:
           PYTHONPATH: ${{ github.workspace }}
-      
+
       - name: Check validation results
         if: steps.changed-rules.outputs.has_changes == 'true'
         run: |
           python validator/check_results.py --results-dir validation_results
-      
+
       - name: Upload validation artifacts
         if: always() && steps.changed-rules.outputs.has_changes == 'true'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: validation-results
-          path: validation_results/
+          path: validation_results/**    # ensure v4 picks up files inside the dir
           retention-days: 30
-      
+
       - name: Comment PR with results
         if: github.event_name == 'pull_request' && steps.changed-rules.outputs.has_changes == 'true'
         uses: actions/github-script@v6
@@ -81,10 +82,10 @@ jobs:
           script: |
             const fs = require('fs');
             const summaryPath = 'validation_results/summary.md';
-            
+
             if (fs.existsSync(summaryPath)) {
               const summary = fs.readFileSync(summaryPath, 'utf8');
-              
+
               github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
