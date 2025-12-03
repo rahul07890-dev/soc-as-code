@@ -1,0 +1,21 @@
+title: "Suspicious PowerShell Execution with Hidden Window"
+id: "SIG-PS-001"
+description: "Detects PowerShell execution with common obfuscation flags"
+level: high
+status: production
+author: "SOC Team"
+date: 2024/12/03
+detection:
+  selection:
+    EventID: 4688
+    NewProcessName: ".*powershell.*"
+    CommandLine: 
+      - "*-nop*"
+      - "*-w hidden*"
+      - "*-enc*"
+  condition: selection
+tags:
+  - attack.execution
+  - attack.t1059.001
+falsepositives:
+  - Legitimate administrative scripts (rare)

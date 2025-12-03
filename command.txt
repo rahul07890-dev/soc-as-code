@@ -1,5 +1,0 @@
-python test.py --logs "dataset\synthetic_test_logs_large.jsonl" --sigma "indata\sigma_test_rules_extensive.yml" --yara "indata\malicious_extensive.yar" --out "output\alerts_large.json" --metrics "output\metrics_large.json"
-
-
-
-(base) C:\Users\91943\Links\MVP>python run_soc.py --logs "dataset\synthetic_test_logs_large.jsonl" --sigma "indata\sigma_test_rules_extensive.yml" --yara "indata\malicious_extensive.yar"
