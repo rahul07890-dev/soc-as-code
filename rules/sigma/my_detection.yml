@@ -1,4 +1,4 @@
-# rules/sigma/my_detection.yml v3
+# rules/sigma/my_detection.yml v4
 title: "My Awesome Detection"
 id: "SIG-001"
 level: high
