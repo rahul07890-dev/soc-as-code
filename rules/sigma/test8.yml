@@ -1,0 +1,19 @@
+title: Detection - Malicious Process Example
+id: SIG-0012
+description: Detect a generated test log with ProcessName malicious.exe
+status: experimental
+author: CI Validator
+date: 2025-01-01
+logsource:
+  category: process
+  product: windows
+detection:
+  selection1:
+    ProcessName: "malicious.exe"
+  condition: selection1
+falsepositives:
+  - Unknown
+level: medium
+tags:
+  - test
+  - ci
