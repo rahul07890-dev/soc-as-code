@@ -1,0 +1,7 @@
+title: "Detection - Malicious CMD Example"
+id: "SIG-CLI-PASS-1"
+level: medium
+detection:
+  selection:
+    CommandLine: "*cmd.exe*"
+  condition: selection
