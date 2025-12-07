@@ -1,0 +1,8 @@
+title: "Detection - Exclude Pattern"
+id: "FAIL-NEG-001"
+level: medium
+description: "Negative lookahead"
+detection:
+  selection:
+    ProcessName: "^(?!.*legitimate).*\\.exe$"
+  condition: selection
