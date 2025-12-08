@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Enhanced Rule Validator with baseline/current mode support
-Supports comparison-based validation methodology
+FIXED: Detections file not being overwritten
 """
 import os
 import sys
@@ -166,7 +166,6 @@ class EnhancedLogGenerator:
 
         # Handle modifiers
         if modifier == 'contains':
-            # Generate string containing the pattern
             variations = [
                 pattern_str,
                 f'prefix_{pattern_str}',
@@ -185,24 +184,19 @@ class EnhancedLogGenerator:
             return f'{prefixes[index % len(prefixes)]}{pattern_str}'
         
         elif modifier == 'all':
-            # All modifier - pattern is a list, value should contain all
             if isinstance(pattern, list):
-                # Return value containing all items
                 return ' '.join(str(p) for p in pattern)
             return pattern_str
         
         elif modifier == 're':
-            # Regex modifier
             return EnhancedLogGenerator._generate_from_regex(pattern_str, index, total)
         
         elif modifier == 'base64':
-            # Base64 encode the pattern
             import base64
             encoded = base64.b64encode(pattern_str.encode()).decode()
             return encoded
         
         elif modifier == 'base64offset':
-            # Base64 with offset (3 possible offsets)
             import base64
             offset = index % 3
             padded = ('A' * offset) + pattern_str
@@ -210,11 +204,9 @@ class EnhancedLogGenerator:
             return encoded[offset:] if offset > 0 else encoded
         
         elif modifier == 'cased':
-            # Case-sensitive - return exact case
             return pattern_str
         
         elif modifier == 'exists':
-            # Field exists check
             return 'exists_value' if pattern else None
 
         # Check if pattern itself is regex or wildcard
@@ -224,7 +216,6 @@ class EnhancedLogGenerator:
         if '*' in pattern_str or '?' in pattern_str:
             return EnhancedLogGenerator._generate_from_wildcard(pattern_str, index, total)
 
-        # Exact match
         return pattern_str
 
     @staticmethod
@@ -237,7 +228,7 @@ class EnhancedLogGenerator:
 
         if pattern is None:
             if modifier == 'exists':
-                return None  # Field shouldn't exist
+                return None
             return f"not_null_{index}"
 
         if isinstance(pattern, bool):
@@ -281,7 +272,6 @@ class EnhancedLogGenerator:
         
         result = pattern
         
-        # Replace common regex patterns
         if '.*' in result:
             variations = ['test', f'var{index}', 'xyz123', 'data']
             parts = result.split('.*')
@@ -292,13 +282,11 @@ class EnhancedLogGenerator:
             parts = result.split('.+')
             result = variations[index % len(variations)].join(parts)
         
-        # Handle character classes
         result = re.sub(r'\\d+', lambda m: str(random.randint(100, 999)), result)
         result = re.sub(r'\\d', lambda m: str(random.randint(0, 9)), result)
         result = re.sub(r'\\w+', lambda m: ''.join(random.choices(string.ascii_letters, k=8)), result)
         result = re.sub(r'\\w', lambda m: random.choice(string.ascii_letters), result)
         
-        # Handle character classes like [A-Za-z0-9]
         def replace_char_class(match):
             char_class = match.group(0)
             if '[A-Za-z0-9+/]' in char_class:
@@ -371,7 +359,7 @@ class RuleValidator:
     def __init__(self, output_dir: str, mode: str = 'current', synthetic_logs_dir: str = None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.mode = mode  # 'baseline' or 'current'
+        self.mode = mode
         self.synthetic_logs_dir = Path(synthetic_logs_dir) if synthetic_logs_dir else None
         self.synthetic_logs = []
         
@@ -382,7 +370,7 @@ class RuleValidator:
             'total_passed': 0,
             'total_failed': 0,
             'details': [],
-            'detections': [],
+            'detections': [],  # This accumulates ALL detections
             'statistics': {}
         }
 
@@ -394,7 +382,6 @@ class RuleValidator:
         
         print(f"[+] Loading synthetic logs from: {self.synthetic_logs_dir}")
         
-        # Load all .jsonl files
         for log_file in self.synthetic_logs_dir.glob('*.jsonl'):
             with open(log_file, 'r') as f:
                 for line in f:
@@ -447,130 +434,27 @@ class RuleValidator:
             
             print(f"    Generated {len(alerts)} total alerts")
             
-            # Store results
-            self.results['detections'] = alerts
+            # CRITICAL FIX: Accumulate detections, don't replace
+            self.results['detections'].extend(alerts)
             self.results['statistics'] = metrics
             
-            # Save detections
-            detections_file = self.output_dir / 'detections.json'
-            with open(detections_file, 'w') as f:
-                json.dump(alerts, f, indent=2)
-            
-            print(f"    Saved detections to: {detections_file}")
-
-    def validate_sigma_rule(self, rule_path: str) -> Dict[str, Any]:
-        """Validate a single Sigma rule (for individual testing)"""
-        print(f"\n[+] Validating Sigma rule: {rule_path}")
-
-        rule_path = Path(rule_path)
-        if not rule_path.exists():
-            return self._create_error_result(str(rule_path), "Rule file not found", rule_type='sigma')
-
-        try:
-            rules = load_sigma_rules(str(rule_path))
-            if not rules:
-                return self._create_error_result(str(rule_path), "No rules found in file", rule_type='sigma')
-
-            rule = rules[0]
-            rule_id = rule.get('id', rule_path.stem)
-            rule_title = rule.get('title', 'Untitled')
-
-            print(f"    Rule ID: {rule_id}")
-            print(f"    Title: {rule_title}")
-
-            # Use synthetic logs if available, otherwise generate
-            if self.synthetic_logs:
-                test_logs = self.synthetic_logs
-                print(f"    Using {len(test_logs)} pre-generated synthetic logs")
-            else:
-                detection = rule.get('detection', {})
-                print(f"    Detection config: {json.dumps(detection, indent=6)}")
-                print(f"    Generating test logs...")
-                test_logs = EnhancedLogGenerator.generate_for_sigma_rule(rule, count=20)
-                
-                # Save test logs
-                test_log_file = self.output_dir / f"test_logs_{rule_id}.jsonl"
-                with open(test_log_file, 'w') as f:
-                    for log in test_logs:
-                        f.write(json.dumps(log) + '\n')
-                print(f"    Generated {len(test_logs)} test logs")
-            
-            # Run simulator
-            print(f"    Running simulator...")
-            simulator = SOCSimulator(sigma_rules=rules, yara_path=None)
-            simulator.process_logs(test_logs)
-
-            alerts = simulator.export_alerts()
-            metrics = simulator.export_metrics()
-
-            # Analyze results
-            expected_matches = sum(
-                1 for log in test_logs
-                if not str(log.get('_test_id', '')).startswith('negative')
-            )
-            actual_matches = len([a for a in alerts if a.get('rule_id') == rule_id])
-
-            print(f"    Expected matches: {expected_matches}")
-            print(f"    Actual matches: {actual_matches}")
-
-            detection_rate = (actual_matches / expected_matches * 100) if expected_matches > 0 else 0
-            
-            # Determine pass/fail
-            passed = detection_rate >= 60
-
-            result = {
-                'rule_path': str(rule_path),
-                'rule_id': rule_id,
-                'rule_title': rule_title,
-                'type': 'sigma',
-                'passed': passed,
-                'expected_matches': expected_matches,
-                'actual_matches': actual_matches,
-                'detection_rate': round(detection_rate, 2),
-                'total_alerts': len(alerts),
-                'metrics': metrics
-            }
-
-            if passed:
-                print(f"    ✓ PASSED - Detection rate: {detection_rate:.1f}%")
-                self.results['total_passed'] += 1
-            else:
-                print(f"    ✗ FAILED - Detection rate: {detection_rate:.1f}% (expected >= 60%)")
-                self.results['total_failed'] += 1
-
-            return result
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"    ✗ ERROR - {str(e)}")
-            return self._create_error_result(
-                str(rule_path), 
-                str(e), 
-                rule_type='sigma',
-                rule_title=rule.get('title') if 'rule' in locals() and isinstance(rule, dict) else None
-            )
-
-    def _create_error_result(self, rule_path: str, error: str, rule_type: str = "unknown", 
-                            rule_title: str = None) -> Dict[str, Any]:
-        """Create an error result"""
-        self.results['total_failed'] += 1
-        return {
-            'rule_path': rule_path,
-            'rule_id': Path(rule_path).stem,
-            'rule_title': rule_title or Path(rule_path).stem,
-            'type': rule_type,
-            'passed': False,
-            'error': error
-        }
+            print(f"    Total accumulated detections: {len(self.results['detections'])}")
 
     def save_results(self):
         """Save validation results"""
+        # Save main results
         results_file = self.output_dir / 'validation_results.json'
         with open(results_file, 'w') as f:
             json.dump(self.results, f, indent=2)
         
-        # Save statistics separately
+        # Save detections ONCE at the end
+        detections_file = self.output_dir / 'detections.json'
+        with open(detections_file, 'w') as f:
+            json.dump(self.results['detections'], f, indent=2)
+        
+        print(f"    Saved {len(self.results['detections'])} detections to: {detections_file}")
+        
+        # Save statistics
         stats_file = self.output_dir / 'statistics.json'
         with open(stats_file, 'w') as f:
             json.dump(self.results.get('statistics', {}), f, indent=2)
@@ -580,12 +464,8 @@ class RuleValidator:
 
 def main():
     parser = argparse.ArgumentParser(description='Enhanced Sigma Rule Validator')
-    parser.add_argument('--sigma-rules', help='Comma-separated list of Sigma rule files (deprecated)')
-    parser.add_argument('--yara-rules', help='Comma-separated list of YARA rule files (deprecated)')
     parser.add_argument('--all-sigma-rules', help='Directory containing all Sigma rules')
     parser.add_argument('--all-yara-rules', help='Directory containing all YARA rules')
-    parser.add_argument('--changed-sigma-rules', help='Comma-separated list of changed Sigma rules')
-    parser.add_argument('--changed-yara-rules', help='Comma-separated list of changed YARA rules')
     parser.add_argument('--synthetic-logs-dir', help='Directory containing pre-generated synthetic logs')
     parser.add_argument('--output-dir', default='validation_results', help='Output directory')
     parser.add_argument('--mode', choices=['baseline', 'current'], default='current',
@@ -599,21 +479,14 @@ def main():
     if args.synthetic_logs_dir:
         validator.load_synthetic_logs()
 
-    # NEW METHOD: Validate all rules in directories
+    # Validate all rules in directories
     if args.all_sigma_rules:
         validator.validate_all_rules(args.all_sigma_rules, rule_type='sigma')
     
     if args.all_yara_rules:
         validator.validate_all_rules(args.all_yara_rules, rule_type='yara')
 
-    # OLD METHOD: Validate individual changed rules (backward compatibility)
-    if args.sigma_rules:
-        sigma_files = [f.strip() for f in args.sigma_rules.split(',') if f.strip()]
-        for rule_file in sigma_files:
-            result = validator.validate_sigma_rule(rule_file)
-            validator.results['details'].append(result)
-            validator.results['rules_tested'].append(rule_file)
-
+    # Save results ONCE at the end
     validator.save_results()
 
     print(f"\n✅ Validation complete in {args.mode} mode")
