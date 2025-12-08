@@ -471,6 +471,136 @@ class RuleValidator:
                 rule_title=rule.get('title') if 'rule' in locals() and isinstance(rule, dict) else None
             )
 
+    def validate_yara_rule(self, rule_path: str) -> Dict[str, Any]:
+        """Validate a single YARA rule"""
+        print(f"\n[+] Validating YARA rule: {rule_path}")
+
+        rule_path = Path(rule_path)
+        if not rule_path.exists():
+            return self._create_error_result(str(rule_path), "Rule file not found", rule_type='yara')
+
+        try:
+            try:
+                import yara  # noqa: F401
+            except ImportError:
+                return self._create_error_result(str(rule_path), "yara-python not installed", rule_type='yara')
+
+            with open(rule_path, 'r') as f:
+                rule_content = f.read()
+
+            rule_name = rule_path.stem
+            print(f"    Rule: {rule_name}")
+
+            # Generate test logs for YARA
+            print(f"    Generating test logs...")
+            test_logs = self._generate_yara_test_logs(rule_content, count=20)
+
+            test_log_file = self.output_dir / f"test_logs_{rule_name}.jsonl"
+            with open(test_log_file, 'w') as f:
+                for log in test_logs:
+                    f.write(json.dumps(log) + '\n')
+
+            print(f"    Running simulator...")
+            simulator = SOCSimulator(sigma_rules=[], yara_path=str(rule_path))
+            simulator.process_logs(test_logs)
+
+            alerts = simulator.export_alerts()
+            metrics = simulator.export_metrics()
+
+            expected_matches = sum(
+                1 for log in test_logs
+                if not str(log.get('_test_id', '')).startswith('negative')
+            )
+            actual_matches = len(alerts)
+
+            detection_rate = (actual_matches / expected_matches * 100) if expected_matches > 0 else 0
+            passed = detection_rate >= 80
+
+            result = {
+                'rule_path': str(rule_path),
+                'rule_id': rule_name,
+                'rule_title': f'YARA: {rule_name}',
+                'type': 'yara',
+                'passed': passed,
+                'expected_matches': expected_matches,
+                'actual_matches': actual_matches,
+                'detection_rate': round(detection_rate, 2),
+                'total_alerts': len(alerts),
+                'metrics': metrics,
+                'test_log_file': str(test_log_file)
+            }
+
+            if passed:
+                print(f"    ✓ PASSED - Detection rate: {detection_rate:.1f}%")
+                self.results['total_passed'] += 1
+            else:
+                print(f"    ✗ FAILED - Detection rate: {detection_rate:.1f}% (expected >= 80%)")
+                self.results['total_failed'] += 1
+
+            return result
+
+        except Exception as e:
+            print(f"    ✗ ERROR - {str(e)}")
+            return self._create_error_result(str(rule_path), str(e), rule_type='yara')
+
+    def _generate_yara_test_logs(self, rule_content: str, count: int = 20) -> List[Dict[str, Any]]:
+        """Generate test logs for YARA rules"""
+        logs = []
+
+        # Parse YARA rule to extract strings
+        strings = []
+        in_strings = False
+        for line in rule_content.split('\n'):
+            line = line.strip()
+            if line.startswith('strings:'):
+                in_strings = True
+                continue
+            if in_strings:
+                if line.startswith('condition:'):
+                    break
+                if '=' in line and '"' in line:
+                    parts = line.split('"')
+                    if len(parts) >= 2:
+                        strings.append(parts[1])
+
+        # Generate matching logs
+        for i in range(count):
+            log = {
+                '_generated': True,
+                '_test_id': str(i),
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+                'host': f'test-host-{i % 3}',
+            }
+
+            if strings:
+                variations = [
+                    strings[0],
+                    f'Test message containing {strings[0]}',
+                    f'{strings[0]} at the start',
+                    f'end with {strings[0]}',
+                    f'prefix {strings[0]} suffix'
+                ]
+                log['message'] = variations[i % len(variations)]
+                log['payload'] = ' '.join(strings[:2]) if len(strings) > 1 else strings[0]
+            else:
+                log['message'] = f'Generic suspicious activity {i}'
+
+            logs.append(log)
+
+        # Generate non-matching logs
+        for i in range(count // 2):
+            log = {
+                '_generated': True,
+                '_test_id': f'negative-{i}',
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+                'host': f'test-host-{i % 3}',
+                'message': f'Benign activity {i}',
+                'payload': f'Normal data {i}'
+            }
+            logs.append(log)
+
+        return logs
+
     def _create_error_result(self, rule_path: str, error: str, rule_type: str = "unknown", 
                             rule_title: str = None) -> Dict[str, Any]:
         """Create an error result"""
@@ -531,15 +661,25 @@ class RuleValidator:
 def main():
     parser = argparse.ArgumentParser(description='Enhanced Sigma Rule Validator')
     parser.add_argument('--sigma-rules', help='Comma-separated list of Sigma rule files')
+    parser.add_argument('--yara-rules', help='Comma-separated list of YARA rule files (optional)')
     parser.add_argument('--output-dir', default='validation_results', help='Output directory')
     args = parser.parse_args()
 
     validator = RuleValidator(args.output_dir)
 
+    # Validate Sigma rules
     if args.sigma_rules:
         sigma_files = [f.strip() for f in args.sigma_rules.split(',') if f.strip()]
         for rule_file in sigma_files:
             result = validator.validate_sigma_rule(rule_file)
+            validator.results['details'].append(result)
+            validator.results['rules_tested'].append(rule_file)
+
+    # Validate YARA rules (basic support)
+    if args.yara_rules:
+        yara_files = [f.strip() for f in args.yara_rules.split(',') if f.strip()]
+        for rule_file in yara_files:
+            result = validator.validate_yara_rule(rule_file)
             validator.results['details'].append(result)
             validator.results['rules_tested'].append(rule_file)
 
