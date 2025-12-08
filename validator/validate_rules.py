@@ -425,7 +425,10 @@ class RuleValidator:
 
             print(f"    Rule ID: {rule_id}")
             print(f"    Title: {rule_title}")
-            print(f"    Detection config: {json.dumps(rule.get('detection', {}), indent=6)}")
+            
+            # Get detection config
+            detection = rule.get('detection', {})
+            print(f"    Detection config: {json.dumps(detection, indent=6)}")
 
             # Generate test logs
             print(f"    Generating test logs...")
