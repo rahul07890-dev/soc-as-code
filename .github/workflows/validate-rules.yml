@@ -354,26 +354,20 @@ EOF
         with:
           script: |
             const fs = require('fs');
-            
             try {
               const summaryPath = 'validation_results/SUMMARY.md';
-              
               if (!fs.existsSync(summaryPath)) {
-                console.log('⚠️ Summary file not found, skipping PR comment');
+                console.log('Summary file not found, skipping PR comment');
                 return;
               }
-              
               const summary = fs.readFileSync(summaryPath, 'utf8');
-              
               await github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 body: summary
               });
-              
-              console.log('✅ Posted results to PR');
+              console.log('Posted results to PR');
             } catch (error) {
-              console.error('❌ Failed to post comment:', error);
-              // Don't fail the workflow if PR comment fails
+              console.error('Failed to post comment:', error);
             }
