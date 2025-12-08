@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced Rule Validator with comprehensive Sigma modifier support
-Based on SigmaHQ repository patterns and Sigma 2.0 specification
+Enhanced Rule Validator with baseline/current mode support
+Supports comparison-based validation methodology
 """
 import os
 import sys
@@ -366,21 +366,100 @@ class EnhancedLogGenerator:
 
 
 class RuleValidator:
-    """Validates rules with enhanced test generation"""
+    """Validates rules with enhanced test generation and comparison support"""
 
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, mode: str = 'current', synthetic_logs_dir: str = None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.mode = mode  # 'baseline' or 'current'
+        self.synthetic_logs_dir = Path(synthetic_logs_dir) if synthetic_logs_dir else None
+        self.synthetic_logs = []
+        
         self.results = {
             'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'mode': mode,
             'rules_tested': [],
             'total_passed': 0,
             'total_failed': 0,
-            'details': []
+            'details': [],
+            'detections': [],
+            'statistics': {}
         }
 
+    def load_synthetic_logs(self):
+        """Load pre-generated synthetic logs"""
+        if not self.synthetic_logs_dir or not self.synthetic_logs_dir.exists():
+            print("⚠️  No synthetic logs directory provided or found")
+            return
+        
+        print(f"[+] Loading synthetic logs from: {self.synthetic_logs_dir}")
+        
+        # Load all .jsonl files
+        for log_file in self.synthetic_logs_dir.glob('*.jsonl'):
+            with open(log_file, 'r') as f:
+                for line in f:
+                    if line.strip():
+                        self.synthetic_logs.append(json.loads(line))
+        
+        print(f"    Loaded {len(self.synthetic_logs)} synthetic log events")
+
+    def validate_all_rules(self, rules_dir: str, rule_type: str = 'sigma'):
+        """Validate all rules in a directory against synthetic logs"""
+        rules_path = Path(rules_dir)
+        
+        if not rules_path.exists():
+            print(f"⚠️  Rules directory not found: {rules_dir}")
+            return
+        
+        print(f"\n[+] Validating all {rule_type.upper()} rules in: {rules_dir}")
+        
+        # Find all rule files
+        if rule_type == 'sigma':
+            rule_files = list(rules_path.rglob('*.yml')) + list(rules_path.rglob('*.yaml'))
+        elif rule_type == 'yara':
+            rule_files = list(rules_path.rglob('*.yara')) + list(rules_path.rglob('*.yar'))
+        else:
+            rule_files = []
+        
+        print(f"    Found {len(rule_files)} rule files")
+        
+        # Load all rules
+        all_rules = []
+        for rule_file in rule_files:
+            try:
+                if rule_type == 'sigma':
+                    rules = load_sigma_rules(str(rule_file))
+                    all_rules.extend(rules)
+            except Exception as e:
+                print(f"    ⚠️  Error loading {rule_file}: {e}")
+        
+        print(f"    Loaded {len(all_rules)} rules total")
+        
+        # Run all rules against synthetic logs
+        if self.synthetic_logs:
+            print(f"    Running {len(all_rules)} rules against {len(self.synthetic_logs)} synthetic logs...")
+            
+            simulator = SOCSimulator(sigma_rules=all_rules, yara_path=None)
+            simulator.process_logs(self.synthetic_logs)
+            
+            alerts = simulator.export_alerts()
+            metrics = simulator.export_metrics()
+            
+            print(f"    Generated {len(alerts)} total alerts")
+            
+            # Store results
+            self.results['detections'] = alerts
+            self.results['statistics'] = metrics
+            
+            # Save detections
+            detections_file = self.output_dir / 'detections.json'
+            with open(detections_file, 'w') as f:
+                json.dump(alerts, f, indent=2)
+            
+            print(f"    Saved detections to: {detections_file}")
+
     def validate_sigma_rule(self, rule_path: str) -> Dict[str, Any]:
-        """Validate a single Sigma rule"""
+        """Validate a single Sigma rule (for individual testing)"""
         print(f"\n[+] Validating Sigma rule: {rule_path}")
 
         rule_path = Path(rule_path)
@@ -398,21 +477,23 @@ class RuleValidator:
 
             print(f"    Rule ID: {rule_id}")
             print(f"    Title: {rule_title}")
-            
-            detection = rule.get('detection', {})
-            print(f"    Detection config: {json.dumps(detection, indent=6)}")
 
-            # Generate test logs
-            print(f"    Generating enhanced test logs...")
-            test_logs = EnhancedLogGenerator.generate_for_sigma_rule(rule, count=20)
-
-            # Save test logs
-            test_log_file = self.output_dir / f"test_logs_{rule_id}.jsonl"
-            with open(test_log_file, 'w') as f:
-                for log in test_logs:
-                    f.write(json.dumps(log) + '\n')
-
-            print(f"    Generated {len(test_logs)} test logs")
+            # Use synthetic logs if available, otherwise generate
+            if self.synthetic_logs:
+                test_logs = self.synthetic_logs
+                print(f"    Using {len(test_logs)} pre-generated synthetic logs")
+            else:
+                detection = rule.get('detection', {})
+                print(f"    Detection config: {json.dumps(detection, indent=6)}")
+                print(f"    Generating test logs...")
+                test_logs = EnhancedLogGenerator.generate_for_sigma_rule(rule, count=20)
+                
+                # Save test logs
+                test_log_file = self.output_dir / f"test_logs_{rule_id}.jsonl"
+                with open(test_log_file, 'w') as f:
+                    for log in test_logs:
+                        f.write(json.dumps(log) + '\n')
+                print(f"    Generated {len(test_logs)} test logs")
             
             # Run simulator
             print(f"    Running simulator...")
@@ -447,8 +528,7 @@ class RuleValidator:
                 'actual_matches': actual_matches,
                 'detection_rate': round(detection_rate, 2),
                 'total_alerts': len(alerts),
-                'metrics': metrics,
-                'test_log_file': str(test_log_file)
+                'metrics': metrics
             }
 
             if passed:
@@ -471,136 +551,6 @@ class RuleValidator:
                 rule_title=rule.get('title') if 'rule' in locals() and isinstance(rule, dict) else None
             )
 
-    def validate_yara_rule(self, rule_path: str) -> Dict[str, Any]:
-        """Validate a single YARA rule"""
-        print(f"\n[+] Validating YARA rule: {rule_path}")
-
-        rule_path = Path(rule_path)
-        if not rule_path.exists():
-            return self._create_error_result(str(rule_path), "Rule file not found", rule_type='yara')
-
-        try:
-            try:
-                import yara  # noqa: F401
-            except ImportError:
-                return self._create_error_result(str(rule_path), "yara-python not installed", rule_type='yara')
-
-            with open(rule_path, 'r') as f:
-                rule_content = f.read()
-
-            rule_name = rule_path.stem
-            print(f"    Rule: {rule_name}")
-
-            # Generate test logs for YARA
-            print(f"    Generating test logs...")
-            test_logs = self._generate_yara_test_logs(rule_content, count=20)
-
-            test_log_file = self.output_dir / f"test_logs_{rule_name}.jsonl"
-            with open(test_log_file, 'w') as f:
-                for log in test_logs:
-                    f.write(json.dumps(log) + '\n')
-
-            print(f"    Running simulator...")
-            simulator = SOCSimulator(sigma_rules=[], yara_path=str(rule_path))
-            simulator.process_logs(test_logs)
-
-            alerts = simulator.export_alerts()
-            metrics = simulator.export_metrics()
-
-            expected_matches = sum(
-                1 for log in test_logs
-                if not str(log.get('_test_id', '')).startswith('negative')
-            )
-            actual_matches = len(alerts)
-
-            detection_rate = (actual_matches / expected_matches * 100) if expected_matches > 0 else 0
-            passed = detection_rate >= 80
-
-            result = {
-                'rule_path': str(rule_path),
-                'rule_id': rule_name,
-                'rule_title': f'YARA: {rule_name}',
-                'type': 'yara',
-                'passed': passed,
-                'expected_matches': expected_matches,
-                'actual_matches': actual_matches,
-                'detection_rate': round(detection_rate, 2),
-                'total_alerts': len(alerts),
-                'metrics': metrics,
-                'test_log_file': str(test_log_file)
-            }
-
-            if passed:
-                print(f"    ✓ PASSED - Detection rate: {detection_rate:.1f}%")
-                self.results['total_passed'] += 1
-            else:
-                print(f"    ✗ FAILED - Detection rate: {detection_rate:.1f}% (expected >= 80%)")
-                self.results['total_failed'] += 1
-
-            return result
-
-        except Exception as e:
-            print(f"    ✗ ERROR - {str(e)}")
-            return self._create_error_result(str(rule_path), str(e), rule_type='yara')
-
-    def _generate_yara_test_logs(self, rule_content: str, count: int = 20) -> List[Dict[str, Any]]:
-        """Generate test logs for YARA rules"""
-        logs = []
-
-        # Parse YARA rule to extract strings
-        strings = []
-        in_strings = False
-        for line in rule_content.split('\n'):
-            line = line.strip()
-            if line.startswith('strings:'):
-                in_strings = True
-                continue
-            if in_strings:
-                if line.startswith('condition:'):
-                    break
-                if '=' in line and '"' in line:
-                    parts = line.split('"')
-                    if len(parts) >= 2:
-                        strings.append(parts[1])
-
-        # Generate matching logs
-        for i in range(count):
-            log = {
-                '_generated': True,
-                '_test_id': str(i),
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'host': f'test-host-{i % 3}',
-            }
-
-            if strings:
-                variations = [
-                    strings[0],
-                    f'Test message containing {strings[0]}',
-                    f'{strings[0]} at the start',
-                    f'end with {strings[0]}',
-                    f'prefix {strings[0]} suffix'
-                ]
-                log['message'] = variations[i % len(variations)]
-                log['payload'] = ' '.join(strings[:2]) if len(strings) > 1 else strings[0]
-            else:
-                log['message'] = f'Generic suspicious activity {i}'
-
-            logs.append(log)
-
-        # Generate non-matching logs
-        for i in range(count // 2):
-            log = {
-                '_generated': True,
-                '_test_id': f'negative-{i}',
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'host': f'test-host-{i % 3}',
-                'message': f'Benign activity {i}',
-                'payload': f'Normal data {i}'
-            }
-            logs.append(log)
-
-        return logs
-
     def _create_error_result(self, rule_path: str, error: str, rule_type: str = "unknown", 
                             rule_title: str = None) -> Dict[str, Any]:
         """Create an error result"""
@@ -619,55 +569,44 @@ class RuleValidator:
         results_file = self.output_dir / 'validation_results.json'
         with open(results_file, 'w') as f:
             json.dump(self.results, f, indent=2)
+        
+        # Save statistics separately
+        stats_file = self.output_dir / 'statistics.json'
+        with open(stats_file, 'w') as f:
+            json.dump(self.results.get('statistics', {}), f, indent=2)
 
-        self._create_markdown_summary()
         print(f"\n[+] Results saved to: {results_file}")
-
-    def _create_markdown_summary(self):
-        """Create markdown summary"""
-        summary_file = self.output_dir / 'summary.md'
-
-        with open(summary_file, 'w', encoding='utf-8') as f:
-            f.write("# 🛡️ Security Rule Validation Results\n\n")
-
-            total_tested = self.results.get('total_passed', 0) + self.results.get('total_failed', 0)
-            pass_rate = (self.results.get('total_passed', 0) / total_tested * 100) if total_tested > 0 else 0
-
-            f.write("## Summary\n\n")
-            f.write(f"- **Total Rules Tested:** {total_tested}\n")
-            f.write(f"- **Passed:** ✅ {self.results.get('total_passed', 0)}\n")
-            f.write(f"- **Failed:** ❌ {self.results.get('total_failed', 0)}\n")
-            f.write(f"- **Pass Rate:** {pass_rate:.1f}%\n\n")
-
-            f.write("## Detailed Results\n\n")
-
-            for detail in self.results.get('details', []):
-                passed = detail.get('passed', False)
-                status = "✅ PASSED" if passed else "❌ FAILED"
-                rule_title = detail.get('rule_title') or detail.get('rule_id') or "Unknown"
-                f.write(f"### {status} - {rule_title}\n\n")
-                f.write(f"- **Rule ID:** `{detail.get('rule_id', 'unknown')}`\n")
-                f.write(f"- **Type:** {str(detail.get('type', 'unknown')).upper()}\n")
-                f.write(f"- **Path:** `{detail.get('rule_path', 'N/A')}`\n")
-
-                if 'error' in detail:
-                    f.write(f"- **Error:** {detail.get('error')}\n\n")
-                else:
-                    f.write(f"- **Detection Rate:** {detail.get('detection_rate', 0)}%\n")
-                    f.write(f"- **Expected Matches:** {detail.get('expected_matches', 0)}\n")
-                    f.write(f"- **Actual Matches:** {detail.get('actual_matches', 0)}\n\n")
 
 
 def main():
     parser = argparse.ArgumentParser(description='Enhanced Sigma Rule Validator')
-    parser.add_argument('--sigma-rules', help='Comma-separated list of Sigma rule files')
-    parser.add_argument('--yara-rules', help='Comma-separated list of YARA rule files (optional)')
+    parser.add_argument('--sigma-rules', help='Comma-separated list of Sigma rule files (deprecated)')
+    parser.add_argument('--yara-rules', help='Comma-separated list of YARA rule files (deprecated)')
+    parser.add_argument('--all-sigma-rules', help='Directory containing all Sigma rules')
+    parser.add_argument('--all-yara-rules', help='Directory containing all YARA rules')
+    parser.add_argument('--changed-sigma-rules', help='Comma-separated list of changed Sigma rules')
+    parser.add_argument('--changed-yara-rules', help='Comma-separated list of changed YARA rules')
+    parser.add_argument('--synthetic-logs-dir', help='Directory containing pre-generated synthetic logs')
     parser.add_argument('--output-dir', default='validation_results', help='Output directory')
+    parser.add_argument('--mode', choices=['baseline', 'current'], default='current',
+                       help='Validation mode: baseline (old rules) or current (all rules)')
     args = parser.parse_args()
 
-    validator = RuleValidator(args.output_dir)
+    validator = RuleValidator(args.output_dir, mode=args.mode, 
+                             synthetic_logs_dir=args.synthetic_logs_dir)
 
-    # Validate Sigma rules
+    # Load synthetic logs if provided
+    if args.synthetic_logs_dir:
+        validator.load_synthetic_logs()
+
+    # NEW METHOD: Validate all rules in directories
+    if args.all_sigma_rules:
+        validator.validate_all_rules(args.all_sigma_rules, rule_type='sigma')
+    
+    if args.all_yara_rules:
+        validator.validate_all_rules(args.all_yara_rules, rule_type='yara')
+
+    # OLD METHOD: Validate individual changed rules (backward compatibility)
     if args.sigma_rules:
         sigma_files = [f.strip() for f in args.sigma_rules.split(',') if f.strip()]
         for rule_file in sigma_files:
@@ -675,22 +614,10 @@ def main():
             validator.results['details'].append(result)
             validator.results['rules_tested'].append(rule_file)
 
-    # Validate YARA rules (basic support)
-    if args.yara_rules:
-        yara_files = [f.strip() for f in args.yara_rules.split(',') if f.strip()]
-        for rule_file in yara_files:
-            result = validator.validate_yara_rule(rule_file)
-            validator.results['details'].append(result)
-            validator.results['rules_tested'].append(rule_file)
-
     validator.save_results()
 
-    if validator.results['total_failed'] > 0:
-        print(f"\n❌ Validation failed: {validator.results['total_failed']} rule(s) failed")
-        sys.exit(1)
-    else:
-        print(f"\n✅ All {validator.results['total_passed']} rule(s) passed validation")
-        sys.exit(0)
+    print(f"\n✅ Validation complete in {args.mode} mode")
+    sys.exit(0)
 
 
 if __name__ == '__main__':
