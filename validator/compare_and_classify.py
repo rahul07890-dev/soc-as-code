@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Compare baseline vs current rule validation results and classify new rules.
+FIXED: Better rule name matching and debug output
 """
 
 import argparse
@@ -54,6 +55,29 @@ class RuleClassifier:
         """Extract rule name from path."""
         return Path(rule_path).stem
     
+    def _extract_rule_identifier(self, detection: Dict) -> str:
+        """
+        Extract rule identifier from detection with multiple fallback methods.
+        Detections might have: rule_name, rule, rule_id, title
+        """
+        # Try different possible keys
+        for key in ['rule_name', 'rule', 'rule_id', 'title']:
+            if key in detection and detection[key]:
+                value = detection[key]
+                # If it's a path, extract just the stem
+                if '/' in str(value):
+                    return Path(value).stem
+                return str(value)
+        
+        # Last resort: try to find anything that looks like a rule name
+        for key, value in detection.items():
+            if 'rule' in key.lower() and value:
+                if '/' in str(value):
+                    return Path(value).stem
+                return str(value)
+        
+        return 'unknown'
+    
     def _calculate_metrics(self, results: Dict) -> Dict:
         """Calculate detection metrics from results."""
         metrics = {
@@ -64,12 +88,12 @@ class RuleClassifier:
             'rule_detection_counts': defaultdict(int)
         }
         
-        # Count detections per rule
+        # Count detections per rule with better identifier extraction
         for detection in results.get('detections', []):
-            rule_name = detection.get('rule_name') or detection.get('rule')
-            if rule_name:
-                metrics['rules_triggered'].add(rule_name)
-                metrics['rule_detection_counts'][rule_name] += 1
+            rule_identifier = self._extract_rule_identifier(detection)
+            if rule_identifier and rule_identifier != 'unknown':
+                metrics['rules_triggered'].add(rule_identifier)
+                metrics['rule_detection_counts'][rule_identifier] += 1
         
         # Calculate precision if we have the data
         if metrics['total_detections'] > 0:
@@ -90,14 +114,47 @@ class RuleClassifier:
         baseline_metrics = self._calculate_metrics(self.baseline_results)
         current_metrics = self._calculate_metrics(self.current_results)
         
-        # Check if new rule triggered any detections
-        rule_triggered = rule_name in current_metrics['rules_triggered']
-        detection_count = current_metrics['rule_detection_counts'].get(rule_name, 0)
+        # Debug output
+        print(f"\n  DEBUG: Analyzing rule '{rule_name}'")
+        print(f"    Baseline rules triggered: {baseline_metrics['rules_triggered']}")
+        print(f"    Current rules triggered: {current_metrics['rules_triggered']}")
+        print(f"    Total current detections: {current_metrics['total_detections']}")
+        
+        # Try multiple ways to match the rule name
+        rule_triggered = False
+        detection_count = 0
+        
+        # Direct name match
+        if rule_name in current_metrics['rules_triggered']:
+            rule_triggered = True
+            detection_count = current_metrics['rule_detection_counts'][rule_name]
+        else:
+            # Try case-insensitive match
+            for triggered_rule in current_metrics['rules_triggered']:
+                if triggered_rule.lower() == rule_name.lower():
+                    rule_triggered = True
+                    detection_count = current_metrics['rule_detection_counts'][triggered_rule]
+                    print(f"    Matched rule via case-insensitive: '{triggered_rule}'")
+                    break
+            
+            # Try partial match (rule name might be part of identifier)
+            if not rule_triggered:
+                for triggered_rule in current_metrics['rules_triggered']:
+                    if rule_name in triggered_rule or triggered_rule in rule_name:
+                        rule_triggered = True
+                        detection_count = current_metrics['rule_detection_counts'][triggered_rule]
+                        print(f"    Matched rule via partial match: '{triggered_rule}'")
+                        break
+        
+        print(f"    Rule triggered: {rule_triggered}")
+        print(f"    Detection count: {detection_count}")
         
         # Calculate delta metrics
         tp_delta = current_metrics['true_positives'] - baseline_metrics['true_positives']
         fp_delta = current_metrics['false_positives'] - baseline_metrics['false_positives']
         precision_delta = current_metrics['precision'] - baseline_metrics['precision']
+        
+        print(f"    TP delta: {tp_delta}, FP delta: {fp_delta}, Precision delta: {precision_delta:.4f}")
         
         # Classification logic
         classification = self._determine_classification(
@@ -121,9 +178,15 @@ class RuleClassifier:
                 'false_positive_delta': fp_delta,
                 'precision_delta': round(precision_delta, 4),
                 'baseline_precision': round(baseline_metrics['precision'], 4),
-                'current_precision': round(current_metrics['precision'], 4)
+                'current_precision': round(current_metrics['precision'], 4),
+                'baseline_total_detections': baseline_metrics['total_detections'],
+                'current_total_detections': current_metrics['total_detections']
             },
-            'reasoning': classification['reasoning']
+            'reasoning': classification['reasoning'],
+            'debug_info': {
+                'baseline_rules_triggered': list(baseline_metrics['rules_triggered']),
+                'current_rules_triggered': list(current_metrics['rules_triggered'])
+            }
         }
     
     def _determine_classification(self, rule_triggered: bool, detection_count: int,
@@ -141,7 +204,7 @@ class RuleClassifier:
                 return {
                     'grade': 'NEUTRAL',
                     'score': 50,
-                    'reasoning': 'Rule did not trigger on synthetic logs. May need more diverse test data.'
+                    'reasoning': 'Rule did not trigger on synthetic logs. May need more diverse test data or check rule name matching.'
                 }
             else:
                 return {
@@ -226,6 +289,7 @@ def main():
     parser.add_argument('--changed-sigma-rules', default='', help='Comma-separated Sigma rules')
     parser.add_argument('--changed-yara-rules', default='', help='Comma-separated YARA rules')
     parser.add_argument('--output-file', required=True, help='Output classification report file')
+    parser.add_argument('--debug', action='store_true', help='Enable debug output')
     
     args = parser.parse_args()
     
@@ -254,16 +318,24 @@ def main():
         # Initialize classifier
         classifier = RuleClassifier(baseline_dir, current_dir)
         
+        # Debug: Show what detections we have
+        if args.debug:
+            print(f"\nDEBUG: Baseline detections: {len(classifier.baseline_results['detections'])}")
+            print(f"DEBUG: Current detections: {len(classifier.current_results['detections'])}")
+            if classifier.current_results['detections']:
+                print(f"DEBUG: Sample detection keys: {classifier.current_results['detections'][0].keys()}")
+                print(f"DEBUG: Sample detection: {json.dumps(classifier.current_results['detections'][0], indent=2)}")
+        
         # Classify all changed rules
         classifications = []
         
         for rule_path in changed_sigma:
-            print(f"Classifying Sigma rule: {rule_path}")
+            print(f"\nClassifying Sigma rule: {rule_path}")
             classification = classifier.classify_rule(rule_path, 'sigma')
             classifications.append(classification)
         
         for rule_path in changed_yara:
-            print(f"Classifying YARA rule: {rule_path}")
+            print(f"\nClassifying YARA rule: {rule_path}")
             classification = classifier.classify_rule(rule_path, 'yara')
             classifications.append(classification)
         
@@ -304,6 +376,11 @@ def main():
     for rule in classification_report['rules']:
         print(f"\n{rule['rule_name']}: {rule['classification']} (Score: {rule['score']}/100)")
         print(f"  {rule['reasoning']}")
+        
+        # Show debug info if available
+        if 'debug_info' in rule and args.debug:
+            print(f"  Debug info:")
+            print(f"    Current rules triggered: {rule['debug_info']['current_rules_triggered']}")
     
     print(f"\nClassification report saved to: {output_file}")
 
