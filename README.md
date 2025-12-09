@@ -64,7 +64,7 @@ Install all required packages using:
 
 pip install -r requirements.txt
 
-Updated dependencies:
+Dependencies:
 ```bash
 pyyaml>=6.0
 yara-python>=4.3.1
