@@ -27,9 +27,14 @@ class WorkingClassifier:
         self.baseline_detections = self._load_detections(baseline_dir)
         self.current_detections = self._load_detections(current_dir)
         
-        # Build rule detection maps
+        # Build rule detection maps (creates both ID and title indexes)
         self.baseline_rules = self._build_rule_map(self.baseline_detections)
         self.current_rules = self._build_rule_map(self.current_detections)
+        
+        # Now we have:
+        # - self.baseline_rules (by ID)
+        # - self.rule_map_by_id (baseline and current)
+        # - self.rule_map_by_title (baseline and current)
         
         # Calculate totals
         self.baseline_total = len(self.baseline_detections)
@@ -37,11 +42,11 @@ class WorkingClassifier:
         self.delta = self.current_total - self.baseline_total
         
         print(f"\n📊 DETECTION ANALYSIS:")
-        print(f"   Baseline: {len(self.baseline_rules)} rules -> {self.baseline_total} alerts")
-        print(f"   Current: {len(self.current_rules)} rules -> {self.current_total} alerts")
+        print(f"   Baseline: {len(self.baseline_rules)} unique rule IDs -> {self.baseline_total} alerts")
+        print(f"   Current: {len(self.current_rules)} unique rule IDs -> {self.current_total} alerts")
         print(f"   Delta: {self.delta:+d} alerts")
         
-        # DEBUG: Show sample rule IDs
+        # DEBUG: Show sample rule IDs and titles
         print(f"\n🔍 Sample baseline rule IDs:")
         for rid in list(self.baseline_rules.keys())[:5]:
             print(f"      - {rid} ({len(self.baseline_rules[rid])} detections)")
@@ -64,21 +69,36 @@ class WorkingClassifier:
         return []
     
     def _build_rule_map(self, detections: List[Dict]) -> Dict[str, List[Dict]]:
-        """Build map of rule_id -> list of detections"""
-        rule_map = defaultdict(list)
+        """
+        Build map of rule_id -> list of detections
+        Creates MULTIPLE indexes for flexible matching
+        """
+        rule_map_by_id = defaultdict(list)
+        rule_map_by_title = defaultdict(list)
         unknown_count = 0
         
         for detection in detections:
             rule_id = self._extract_rule_id(detection)
+            rule_title = detection.get('rule_title', '')
+            
             if rule_id and rule_id != 'unknown':
-                rule_map[rule_id].append(detection)
+                rule_map_by_id[rule_id].append(detection)
             else:
                 unknown_count += 1
+            
+            # Also index by title for fallback matching
+            if rule_title:
+                rule_map_by_title[rule_title].append(detection)
         
         if unknown_count > 0:
             print(f"   ⚠️  {unknown_count} detections had unknown rule IDs")
         
-        return dict(rule_map)
+        # Store both maps
+        self.rule_map_by_id = dict(rule_map_by_id)
+        self.rule_map_by_title = dict(rule_map_by_title)
+        
+        # Return the ID map as primary
+        return self.rule_map_by_id
     
     def _extract_rule_id(self, detection: Dict) -> str:
         """Extract rule identifier from detection JSON"""
@@ -102,125 +122,168 @@ class WorkingClassifier:
         
         return 'unknown'
     
-    def _extract_rule_id_from_yaml(self, rule_path: str) -> str:
+    def _extract_rule_identifiers_from_yaml(self, rule_path: str) -> Dict[str, str]:
         """
-        Extract the actual rule ID from the YAML file
-        This is THE KEY FIX - we need the ID from inside the YAML, not the filename
+        Extract multiple identifiers from YAML file
+        Returns dict with 'id', 'title', 'filename' for flexible matching
         """
+        print(f"\n   📄 Reading YAML file: {rule_path}")
+        
+        result = {
+            'id': None,
+            'title': None,
+            'filename': Path(rule_path).stem
+        }
+        
         try:
             with open(rule_path, 'r') as f:
                 rule_data = yaml.safe_load(f)
                 
                 if not rule_data:
                     print(f"   ⚠️  Empty YAML file")
-                    return None
+                    return result
                 
-                # Try to find the ID field (common in Sigma rules)
+                print(f"   🔍 YAML keys found: {list(rule_data.keys())}")
+                
+                # Extract ID
                 if 'id' in rule_data:
-                    rule_id = str(rule_data['id']).strip()
-                    print(f"   Found ID in YAML: {rule_id}")
-                    return rule_id
+                    result['id'] = str(rule_data['id']).strip()
+                    print(f"   ✅ Found 'id': {result['id']}")
                 
-                # Fallback to title
+                # Extract title
                 if 'title' in rule_data:
-                    rule_title = str(rule_data['title']).strip()
-                    print(f"   Using title as ID: {rule_title}")
-                    return rule_title
+                    result['title'] = str(rule_data['title']).strip()
+                    print(f"   ✅ Found 'title': {result['title']}")
                 
-                # Last resort: filename
-                rule_name = Path(rule_path).stem
-                print(f"   ⚠️  No ID/title in YAML, using filename: {rule_name}")
-                return rule_name
+                return result
                 
         except Exception as e:
             print(f"   ❌ Error reading YAML: {e}")
-            return None
+            import traceback
+            traceback.print_exc()
+            return result
     
     def classify_new_rule(self, rule_path: str) -> Dict:
         """
         Classify a new rule based on its actual contribution
-        FIXED: Now extracts rule ID from YAML content
+        FIXED: Tries multiple matching strategies (ID, title, filename)
         """
         print(f"\n{'='*70}")
         print(f"🔍 ANALYZING: {rule_path}")
         print(f"{'='*70}")
         
-        # Extract the actual rule ID from the YAML file
-        rule_id_from_yaml = self._extract_rule_id_from_yaml(rule_path)
+        # Extract identifiers from YAML
+        identifiers = self._extract_rule_identifiers_from_yaml(rule_path)
         
-        if not rule_id_from_yaml:
+        if not any(identifiers.values()):
             return {
                 'rule_name': Path(rule_path).stem,
                 'rule_path': rule_path,
                 'classification': 'ERROR',
                 'score': 0,
-                'reasoning': 'Could not extract rule ID from YAML file',
+                'reasoning': 'Could not extract any identifiers from YAML file',
                 'triggered': False,
                 'detection_count': 0,
                 'metrics': {}
             }
         
-        # Check if rule exists in baseline
-        in_baseline = rule_id_from_yaml in self.baseline_rules
-        in_current = rule_id_from_yaml in self.current_rules
+        # Try multiple matching strategies
+        print(f"\n   🔎 Trying to match detections using:")
+        print(f"      1. ID: {identifiers['id']}")
+        print(f"      2. Title: {identifiers['title']}")
+        print(f"      3. Filename: {identifiers['filename']}")
         
-        print(f"   In baseline: {in_baseline}")
-        print(f"   In current: {in_current}")
+        # Strategy 1: Match by ID
+        matched_by = None
+        rule_detection_count = 0
         
-        if in_baseline:
-            baseline_count = len(self.baseline_rules[rule_id_from_yaml])
-            current_count = len(self.current_rules.get(rule_id_from_yaml, []))
-            
-            return {
-                'rule_name': Path(rule_path).stem,
-                'rule_path': rule_path,
-                'rule_id_from_yaml': rule_id_from_yaml,
-                'classification': 'ERROR',
-                'score': 0,
-                'reasoning': f'Rule "{rule_id_from_yaml}" exists in baseline ({baseline_count} alerts). Not a new rule!',
-                'triggered': True,
-                'detection_count': current_count,
-                'metrics': {
-                    'baseline_alerts': self.baseline_total,
-                    'current_alerts': self.current_total,
-                    'delta': self.delta
+        if identifiers['id']:
+            if identifiers['id'] in self.baseline_rules:
+                baseline_count = len(self.baseline_rules[identifiers['id']])
+                current_count = len(self.current_rules.get(identifiers['id'], []))
+                
+                return {
+                    'rule_name': Path(rule_path).stem,
+                    'rule_path': rule_path,
+                    'rule_id': identifiers['id'],
+                    'classification': 'ERROR',
+                    'score': 0,
+                    'reasoning': f'Rule ID "{identifiers["id"]}" exists in baseline ({baseline_count} alerts). Not a new rule!',
+                    'triggered': True,
+                    'detection_count': current_count,
+                    'metrics': {
+                        'baseline_alerts': self.baseline_total,
+                        'current_alerts': self.current_total,
+                        'delta': self.delta
+                    }
                 }
-            }
+            
+            if identifiers['id'] in self.current_rules:
+                rule_detection_count = len(self.current_rules[identifiers['id']])
+                matched_by = 'ID'
+                print(f"   ✅ Matched by ID: {identifiers['id']} ({rule_detection_count} detections)")
         
-        # Count detections from this rule
-        rule_detection_count = len(self.current_rules.get(rule_id_from_yaml, []))
+        # Strategy 2: Match by title (if ID didn't match)
+        if rule_detection_count == 0 and identifiers['title']:
+            # Check baseline
+            baseline_by_title = self.rule_map_by_title if hasattr(self, 'rule_map_by_title') else {}
+            if identifiers['title'] in baseline_by_title:
+                baseline_count = len(baseline_by_title[identifiers['title']])
+                print(f"   ⚠️  Rule title exists in baseline ({baseline_count} alerts)")
+            
+            # Check current
+            if identifiers['title'] in self.rule_map_by_title:
+                rule_detection_count = len(self.rule_map_by_title[identifiers['title']])
+                matched_by = 'Title'
+                print(f"   ✅ Matched by Title: {identifiers['title']} ({rule_detection_count} detections)")
         
-        print(f"✓ Rule ID from YAML: {rule_id_from_yaml}")
-        print(f"✓ Detection count: {rule_detection_count}")
+        # Strategy 3: Match by filename (last resort)
+        if rule_detection_count == 0:
+            for key in [identifiers['filename'], identifiers['filename'].upper(), identifiers['filename'].lower()]:
+                if key in self.current_rules:
+                    rule_detection_count = len(self.current_rules[key])
+                    matched_by = 'Filename'
+                    print(f"   ✅ Matched by Filename: {key} ({rule_detection_count} detections)")
+                    break
+        
+        if matched_by:
+            print(f"   🎯 Match strategy: {matched_by}")
+        else:
+            print(f"   ❌ No matches found in current detections")
         
         # SCORING LOGIC
         if rule_detection_count == 0:
             score = 20
             grade = 'WEAK'
-            reasoning = 'Rule did not trigger on any logs. Possible causes: (1) unsupported log source, (2) overly specific pattern, (3) syntax errors.'
+            reasoning = 'Rule did not trigger on any logs. Possible causes: (1) unsupported log source, (2) overly specific pattern, (3) syntax errors, (4) ID mismatch between YAML and detections.'
         
         elif rule_detection_count >= 50:
             score = 95
             grade = 'STRONG'
             reasoning = f'Excellent! Rule detected {rule_detection_count} events. Very high-value detection capability.'
         
-        elif rule_detection_count >= 20:
-            score = 85
+        elif rule_detection_count >= 30:
+            score = 80
             grade = 'STRONG'
-            reasoning = f'Strong detection capability with {rule_detection_count} alerts. High value addition.'
+            reasoning = f'Strong detection capability with {rule_detection_count} alerts. Significant value addition.'
         
-        elif rule_detection_count >= 10:
+        elif rule_detection_count >= 20:
             score = 70
             grade = 'STRONG'
             reasoning = f'Good detection rate ({rule_detection_count} alerts). Solid contribution.'
         
+        elif rule_detection_count >= 10:
+            score = 60
+            grade = 'STRONG'
+            reasoning = f'Decent detection rate ({rule_detection_count} alerts). Adds value.'
+        
         elif rule_detection_count >= 5:
-            score = 55
+            score = 50
             grade = 'NEUTRAL'
             reasoning = f'Moderate detection ({rule_detection_count} alerts). Rule works but has limited coverage.'
         
         elif rule_detection_count >= 2:
-            score = 45
+            score = 42
             grade = 'NEUTRAL'
             reasoning = f'Low detection rate ({rule_detection_count} alerts). Very narrow scope or insufficient test data.'
         
@@ -245,6 +308,10 @@ class WorkingClassifier:
             score -= 10
             reasoning += ' ⚠️  Total alerts unchanged (possible duplicate detection).'
         
+        # Bonus for using title match (shows system is working even if IDs don't match)
+        if matched_by == 'Title' and rule_detection_count > 0:
+            reasoning += f' (Matched by rule title since ID "{identifiers["id"]}" not found in detections.)'
+        
         # Clamp score
         score = max(0, min(100, score))
         
@@ -259,7 +326,9 @@ class WorkingClassifier:
         result = {
             'rule_name': Path(rule_path).stem,
             'rule_path': rule_path,
-            'rule_id_from_yaml': rule_id_from_yaml,
+            'rule_id': identifiers['id'],
+            'rule_title': identifiers['title'],
+            'matched_by': matched_by,
             'classification': grade,
             'score': score,
             'reasoning': reasoning,
@@ -293,7 +362,7 @@ def main():
     )
     parser.add_argument('--baseline-results', required=True)
     parser.add_argument('--current-results', required=True)
-    parser.add_argument('--rules-dir', required=True, help='Directory containing rule files')
+    parser.add_argument('--rules-dir', default='rules/sigma', help='Directory containing rule files (default: rules/sigma)')
     parser.add_argument('--changed-sigma-rules', default='')
     parser.add_argument('--changed-yara-rules', default='')
     parser.add_argument('--output-file', required=True)
