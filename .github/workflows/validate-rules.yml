@@ -3,7 +3,7 @@ name: Validate Security Rules
 on:
   push:
     paths:
-      - 'rules/sigma/**'
+      - 'rules/sigma2/**'
       - 'rules/yara/**'
   pull_request:
     paths:
@@ -306,3 +306,4 @@ jobs:
                 body: summary
               });
             }
+
