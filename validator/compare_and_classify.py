@@ -54,6 +54,26 @@ class WorkingClassifier:
         print(f"\n🔍 Sample current rule IDs:")
         for rid in list(self.current_rules.keys())[:5]:
             print(f"      - {rid} ({len(self.current_rules[rid])} detections)")
+        
+        # Show NEW rule IDs (in current but not baseline)
+        new_rule_ids = set(self.current_rules.keys()) - set(self.baseline_rules.keys())
+        if new_rule_ids:
+            print(f"\n🆕 NEW rule IDs (in current but not baseline):")
+            for rid in list(new_rule_ids)[:10]:
+                print(f"      - {rid} ({len(self.current_rules[rid])} detections)")
+        else:
+            print(f"\n⚠️  No new rule IDs detected (current and baseline have same rule IDs)")
+        
+        # Show all unique rule titles in current
+        all_titles = set()
+        for det in self.current_detections[:100]:  # Sample first 100
+            if 'rule_title' in det:
+                all_titles.add(det['rule_title'])
+        
+        if all_titles:
+            print(f"\n📋 Sample rule titles found in detections:")
+            for title in list(all_titles)[:10]:
+                print(f"      - {title}")
     
     def _load_detections(self, results_dir: Path) -> List[Dict]:
         """Load detections from results directory"""
@@ -196,10 +216,15 @@ class WorkingClassifier:
         # Strategy 1: Match by ID
         matched_by = None
         rule_detection_count = 0
+        baseline_count_by_id = 0
+        baseline_count_by_title = 0
         
         if identifiers['id']:
+            # Check baseline by ID
             if identifiers['id'] in self.baseline_rules:
-                baseline_count = len(self.baseline_rules[identifiers['id']])
+                baseline_count_by_id = len(self.baseline_rules[identifiers['id']])
+                print(f"   ⚠️  ID exists in baseline: {identifiers['id']} ({baseline_count_by_id} alerts)")
+                
                 current_count = len(self.current_rules.get(identifiers['id'], []))
                 
                 return {
@@ -208,7 +233,7 @@ class WorkingClassifier:
                     'rule_id': identifiers['id'],
                     'classification': 'ERROR',
                     'score': 0,
-                    'reasoning': f'Rule ID "{identifiers["id"]}" exists in baseline ({baseline_count} alerts). Not a new rule!',
+                    'reasoning': f'Rule ID "{identifiers["id"]}" exists in baseline ({baseline_count_by_id} alerts). Not a new rule!',
                     'triggered': True,
                     'detection_count': current_count,
                     'metrics': {
@@ -218,33 +243,75 @@ class WorkingClassifier:
                     }
                 }
             
+            # Check current by ID
             if identifiers['id'] in self.current_rules:
                 rule_detection_count = len(self.current_rules[identifiers['id']])
                 matched_by = 'ID'
                 print(f"   ✅ Matched by ID: {identifiers['id']} ({rule_detection_count} detections)")
+            else:
+                print(f"   ❌ ID not found in current: {identifiers['id']}")
         
         # Strategy 2: Match by title (if ID didn't match)
         if rule_detection_count == 0 and identifiers['title']:
-            # Check baseline
-            baseline_by_title = self.rule_map_by_title if hasattr(self, 'rule_map_by_title') else {}
-            if identifiers['title'] in baseline_by_title:
-                baseline_count = len(baseline_by_title[identifiers['title']])
-                print(f"   ⚠️  Rule title exists in baseline ({baseline_count} alerts)")
-            
-            # Check current
-            if identifiers['title'] in self.rule_map_by_title:
-                rule_detection_count = len(self.rule_map_by_title[identifiers['title']])
-                matched_by = 'Title'
-                print(f"   ✅ Matched by Title: {identifiers['title']} ({rule_detection_count} detections)")
+            # Check if we have the title index
+            if not hasattr(self, 'rule_map_by_title'):
+                print(f"   ⚠️  Title index not available")
+            else:
+                # Check baseline by title
+                baseline_title_index = {}
+                for det in self.baseline_detections:
+                    title = det.get('rule_title', '')
+                    if title:
+                        baseline_title_index[title] = baseline_title_index.get(title, 0) + 1
+                
+                if identifiers['title'] in baseline_title_index:
+                    baseline_count_by_title = baseline_title_index[identifiers['title']]
+                    print(f"   ⚠️  Title exists in baseline: {identifiers['title']} ({baseline_count_by_title} alerts)")
+                
+                # Check current by title
+                current_title_index = {}
+                for det in self.current_detections:
+                    title = det.get('rule_title', '')
+                    if title:
+                        current_title_index[title] = current_title_index.get(title, 0) + 1
+                
+                if identifiers['title'] in current_title_index:
+                    rule_detection_count = current_title_index[identifiers['title']]
+                    matched_by = 'Title'
+                    print(f"   ✅ Matched by Title: {identifiers['title']} ({rule_detection_count} detections)")
+                    
+                    # If title exists in baseline too, this is an ERROR
+                    if baseline_count_by_title > 0:
+                        return {
+                            'rule_name': Path(rule_path).stem,
+                            'rule_path': rule_path,
+                            'rule_id': identifiers['id'],
+                            'rule_title': identifiers['title'],
+                            'classification': 'ERROR',
+                            'score': 0,
+                            'reasoning': f'Rule title "{identifiers["title"]}" exists in baseline ({baseline_count_by_title} alerts). Not a new rule! (ID "{identifiers["id"]}" not found in detections - possible ID mismatch)',
+                            'triggered': True,
+                            'detection_count': rule_detection_count,
+                            'metrics': {
+                                'baseline_alerts': self.baseline_total,
+                                'current_alerts': self.current_total,
+                                'delta': self.delta
+                            }
+                        }
+                else:
+                    print(f"   ❌ Title not found in current: {identifiers['title']}")
         
         # Strategy 3: Match by filename (last resort)
         if rule_detection_count == 0:
+            print(f"   Trying filename variations...")
             for key in [identifiers['filename'], identifiers['filename'].upper(), identifiers['filename'].lower()]:
                 if key in self.current_rules:
                     rule_detection_count = len(self.current_rules[key])
                     matched_by = 'Filename'
                     print(f"   ✅ Matched by Filename: {key} ({rule_detection_count} detections)")
                     break
+                else:
+                    print(f"   ❌ Filename not found: {key}")
         
         if matched_by:
             print(f"   🎯 Match strategy: {matched_by}")
