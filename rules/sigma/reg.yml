@@ -1,0 +1,13 @@
+# sigma_rules/registry_run_key_uncommon_path.yml
+title: Registry Run Key From Temp Directory
+status: experimental
+logsource:
+  category: registry_set
+  product: windows
+detection:
+  selection:
+    TargetObject|contains: '\CurrentVersion\Run'
+    Details|contains:
+      - '\Temp\'
+      - '\AppData\Local\Temp\'
+  condition: selection
