@@ -57,26 +57,26 @@ def get_risk_level(score: float) -> str:
 
 
 def get_classification_from_score(score_percent: float) -> str:
-    """Map a numeric score percentage (0-100) to a classification grade."""
-    if score_percent >= 80:
-        return "EXCELLENT"
-    elif score_percent >= 65:
-        return "GOOD"
-    elif score_percent >= 45:
+    """
+    Map a numeric score percentage (0-100) to a classification grade using
+    the 3-tier scheme requested by the user:
+      - < 80    -> WEAK
+      - 80-89.99 -> NEUTRAL
+      - 90-100  -> STRONG
+    """
+    if score_percent >= 90:
+        return "STRONG"
+    elif score_percent >= 80:
         return "NEUTRAL"
-    elif score_percent >= 30:
-        return "CONCERNING"
     else:
-        return "BAD"
+        return "WEAK"
 
 
 def get_grade_icon(grade: str) -> str:
     icons = {
-        'EXCELLENT': '🌟',
-        'GOOD': '✅',
+        'STRONG': '🌟',
         'NEUTRAL': '➖',
-        'CONCERNING': '⚠️',
-        'BAD': '❌'
+        'WEAK': '❌'
     }
     return icons.get(grade, '')
 
@@ -133,7 +133,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     provided_by_grade = summary.get('by_grade', {}) or {}
 
     # If rules exist, recompute per-rule transformed classifications to ensure consistency
-    computed_by_grade = {'EXCELLENT': 0, 'GOOD': 0, 'NEUTRAL': 0, 'CONCERNING': 0, 'BAD': 0}
+    computed_by_grade = {'STRONG': 0, 'NEUTRAL': 0, 'WEAK': 0}
     processed_rules = []
 
     for rule in rules:
@@ -175,7 +175,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
 
     if by_grade:
         print("\nGrade Distribution:")
-        grade_order = ['EXCELLENT', 'GOOD', 'NEUTRAL', 'CONCERNING', 'BAD']
+        grade_order = ['STRONG', 'NEUTRAL', 'WEAK']
         for grade in grade_order:
             cnt = by_grade.get(grade, 0)
             if cnt:
@@ -224,25 +224,21 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     print(f"   Risk Level: {risk_level}")
     print("\n" + "=" * 70)
 
-    # Pass/fail logic based on by_grade
-    bad_rules = by_grade.get('BAD', 0)
-    concerning_rules = by_grade.get('CONCERNING', 0)
+    # Pass/fail logic based on by_grade (adapted to three-tier: treat WEAK as problematic)
+    weak_rules = by_grade.get('WEAK', 0)
 
     if fail_on_bad_rules:
-        if bad_rules > 0:
-            print(f"\nVALIDATION FAILED — {bad_rules} BAD rule(s)")
+        if weak_rules > 0:
+            print(f"\nVALIDATION FAILED — {weak_rules} WEAK rule(s)")
             sys.exit(1)
-        elif concerning_rules > 0:
-            print(f"\nVALIDATION PASSED WITH WARNINGS — {concerning_rules} concerning rule(s)")
-            sys.exit(0)
         else:
             print(f"\nVALIDATION PASSED — All rules meet quality standard")
             sys.exit(0)
 
     else:
-        if bad_rules > 0 or concerning_rules > 0:
+        if weak_rules > 0:
             print(f"\nQUALITY CONCERNS DETECTED")
-            print(f"   BAD: {bad_rules} | CONCERNING: {concerning_rules}")
+            print(f"   WEAK: {weak_rules}")
         else:
             print(f"\nALL RULES MEET QUALITY STANDARDS")
 
@@ -328,4 +324,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
