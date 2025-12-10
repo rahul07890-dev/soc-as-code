@@ -1,0 +1,16 @@
+# sigma_rules/process_creation_suspicious_powershell.yml
+title: Suspicious PowerShell Command Line
+status: experimental
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    Image|endswith: '\powershell.exe'
+    CommandLine|contains:
+      - '-enc'
+      - '-encodedcommand'
+      - 'downloadstring'
+      - 'invoke-expression'
+      - 'bypass'
+  condition: selection

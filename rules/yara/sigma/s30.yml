@@ -1,0 +1,13 @@
+title: Strong Rule - Broad High Frequency
+id: SIG-90021
+status: experimental
+description: Broad rule that matches a very common Windows process creation pattern (EventID 4688) — high hit rate in synthetic dataset.
+logsource:
+  product: windows
+detection:
+  selection:
+    EventID: 4688
+  condition: selection
+falsepositives:
+  - common admin activity
+level: high

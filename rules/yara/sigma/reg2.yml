@@ -1,0 +1,14 @@
+# rules/sigma/reg.yml
+id: REG-TEMP-001
+title: Registry Run Key From Temp Directory
+status: test
+logsource:
+  category: registry_set
+  product: windows
+detection:
+  selection:
+    TargetObject|contains: '\CurrentVersion\Run'
+    Details|contains:
+      - '\Temp\'
+      - '\AppData\Local\Temp\'
+  condition: selection

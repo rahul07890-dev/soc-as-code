@@ -1,0 +1,17 @@
+title: AWS Console Login Detection
+id: aws-console-login-001
+status: test
+description: Detects AWS console login events
+logsource:
+  product: aws
+  service: cloudtrail
+detection:
+  selection:
+    eventName: ConsoleLogin
+  condition: selection
+falsepositives:
+  - Legitimate console access
+level: medium
+tags:
+  - attack.initial-access
+  - attack.t1078

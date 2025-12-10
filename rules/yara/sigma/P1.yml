@@ -1,0 +1,8 @@
+title: "Detection - Base64 Encoded PowerShell"
+id: "PASS-REGEX-001"
+level: critical
+description: "Detects base64 encoded commands (regex pattern)"
+detection:
+  selection:
+    CommandLine: ".*[A-Za-z0-9+/]{20,}={0,2}.*"
+  condition: selection

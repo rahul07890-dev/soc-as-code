@@ -1,0 +1,16 @@
+title: UltraStrongRule_b78fd912ae
+id: SIG-90030
+status: stable
+description: Rule intentionally crafted to generate high detection volume in synthetic logs.
+logsource:
+  product: windows
+
+detection:
+  selection:
+    EventID: 4688
+    CommandLine|contains: "malicious"
+  condition: selection
+
+falsepositives:
+  - possible testing noise
+level: high

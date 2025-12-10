@@ -1,0 +1,14 @@
+title: Strong Rule - CommandLine Malicious
+id: SIG-90022
+status: experimental
+description: Matches process creations where the command line contains known malicious keyword patterns (broad string match).
+logsource:
+  product: windows
+detection:
+  selection:
+    EventID: 4688
+    CommandLine|contains: "malicious"
+  condition: selection
+falsepositives:
+  - benign scripted activity that uses the word malicious in test logs
+level: high

@@ -1,0 +1,10 @@
+title: "Detection - Unexpected Parent Process"
+id: "FAIL-NOT-001"
+level: medium
+description: "Uses NOT condition"
+detection:
+  selection_child:
+    ProcessName: "cmd.exe"
+  filter_parent:
+    ParentProcessName: "explorer.exe"
+  condition: selection_child and not filter_parent
