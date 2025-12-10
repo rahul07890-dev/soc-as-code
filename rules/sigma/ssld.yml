@@ -1,0 +1,16 @@
+title: Neutral Rule - SYSTEM Service Launch Detect
+id: SIG-90041
+status: experimental
+description: Detects services or executables started by the SYSTEM account where the command line contains suspicious keywords.
+logsource:
+  product: windows
+detection:
+  selection:
+    EventID: 4697
+    ServiceName|contains: 'svc'
+    Image|endswith: '\svchost.exe'
+    User: 'SYSTEM'
+  condition: selection
+falsepositives:
+  - legitimate system service deployments or updates
+level: medium
