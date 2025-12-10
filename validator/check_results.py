@@ -219,7 +219,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     risk_level = get_risk_level(final_avg)
 
     # Print final normalized score (transformed)
-    print("\nFINAL NORMALIZED SCORE")
+    print("\nFINAL SCORE")
     print(f"   Score: {final_avg:.2f}")
     print(f"   Risk Level: {risk_level}")
     print("\n" + "=" * 70)
@@ -328,3 +328,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
