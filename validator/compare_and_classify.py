@@ -5,7 +5,8 @@ compare_and_classify.py
 - Classifies rules based on raw composite (detection quality).
 - Display score is transformed (if raw < 25 -> raw*4), but classification uses raw.
 - detection_count = TP, total_detections = total hits, triggered = TP > 0.
-- Intended to be run across all rules (e.g., rules/sigma/*).
+- Accepts --debug flag to print helpful diagnostics for CI / local debugging.
+- Intended to run across all rules (e.g., rules/sigma/*).
 """
 import argparse
 import json
@@ -13,7 +14,10 @@ import yaml
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
+import sys
+import re
 
+# ---------------- helpers ----------------
 def load_json(path: Path):
     if not path.exists():
         return []
@@ -102,16 +106,20 @@ def classify_from_raw(raw_pct: float) -> str:
         return "CONCERNING"
     return "BAD"
 
+# ---------------- Classifier ----------------
 class Classifier:
-    def __init__(self, baseline_dir: Path, current_dir: Path, synthetic_combined_file: Path):
+    def __init__(self, baseline_dir: Path, current_dir: Path, synthetic_combined_file: Path, debug: bool = False):
+        self.debug = debug
         self.baseline_dets = load_json(baseline_dir / "detections.json") if baseline_dir else []
         self.current_dets = load_json(current_dir / "detections.json") if current_dir else []
         self.synthetic_logs = load_synthetic_logs(synthetic_combined_file)
+        # map synthetic_id -> log
         self.synthetic_map = {}
         for l in self.synthetic_logs:
             sid = l.get("_synthetic_id")
             if sid:
                 self.synthetic_map[sid] = l
+        # pre-index detections by synthetic id if present
         self.indexed_current = defaultdict(list)
         for det in self.current_dets:
             raw = det.get("raw") or det.get("log") or det.get("_raw") or det.get("original_event") or {}
@@ -123,19 +131,26 @@ class Classifier:
             if sid:
                 self.indexed_current[sid].append(det)
 
+        if self.debug:
+            print(f"[DEBUG] Loaded {len(self.baseline_dets)} baseline detections, {len(self.current_dets)} current detections")
+            print(f"[DEBUG] Loaded {len(self.synthetic_logs)} synthetic logs, synthetic_map size {len(self.synthetic_map)}")
+
     def classify_rule(self, rule_path: Path):
         ids = extract_rule_identifiers_from_yaml(rule_path)
         rid = ids.get("id")
         title = ids.get("title")
         name = rule_path.stem
 
+        # Gather synthetic logs generated "for" this rule (origin=new)
         logs_for_rule = [l for l in self.synthetic_logs if l.get("_origin") == "new" and l.get("_source_rule_id") in {rid, name, title}]
         if not logs_for_rule:
             logs_for_rule = [l for l in self.synthetic_logs if l.get("_origin") == "new" and l.get("_source_rule_id") in {name, title}]
         generated_count = len(logs_for_rule)
 
+        # Detections mapping and attribution
         matched_sids = set()
         detections_for_rule = []
+
         for det in self.current_dets:
             raw = det.get("raw") or det.get("log") or det.get("_raw") or det.get("original_event") or {}
             sid = None
@@ -144,14 +159,13 @@ class Classifier:
                 sid = raw.get("_synthetic_id") or raw.get("_syntheticId") or raw.get("_syntheticID")
                 src_rid = raw.get("_source_rule_id") or raw.get("source_rule_id")
             else:
+                # naive string parsing fallback
                 try:
                     if isinstance(raw, str) and "_synthetic_id" in raw:
-                        import re
                         m = re.search(r'"_synthetic_id"\s*:\s*"([^"]+)"', raw)
                         if m:
                             sid = m.group(1)
                     if isinstance(raw, str) and "_source_rule_id" in raw:
-                        import re
                         m2 = re.search(r'"_source_rule_id"\s*:\s*"([^"]+)"', raw)
                         if m2:
                             src_rid = m2.group(1)
@@ -164,8 +178,13 @@ class Classifier:
             elif src_rid and str(src_rid) in {rid, name, title}:
                 detections_for_rule.append(det)
             else:
+                # ambiguous/other detections are not attributed here
                 pass
 
+        if self.debug:
+            print(f"[DEBUG] Rule {name}: generated_count={generated_count}, matched_sids={len(matched_sids)} , detections_for_rule={len(detections_for_rule)}")
+
+        # True Positives and False Positives (based on synthetic map)
         tp_sids = set()
         fp_sids = set()
         for sid in matched_sids:
@@ -182,22 +201,30 @@ class Classifier:
         FP = len(fp_sids)
         FN = max(0, generated_count - TP)
 
+        # Precision / Recall / F1 (safe)
         precision = (TP / (TP + FP)) if (TP + FP) > 0 else 0.0
         recall = (TP / (TP + FN)) if (TP + FN) > 0 else 0.0
         f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
 
+        # Structural score from heuristics
         struct_score = structure_score_for_rule(rule_path)
+
+        # Noise penalty: fraction of detections that were FP among all matched_sids
         noise_ratio = (FP / (TP + FP)) if (TP + FP) > 0 else 0.0
 
-        # weights tuned for SOC sensitivity
+        # Composite scoring (raw composite) with SOC-tuned weights
         composite = (f1 * 100.0) * 0.60 + (1 - noise_ratio) * 100.0 * 0.25 + (struct_score) * 0.15
         composite = clamp(round(composite, 2), 0, 100)
-        transformed = transform_score(composite)
 
-        detection_count_tp = TP
+        # Transform for display only
+        transformed_score = transform_score(composite)
+
+        # detection_count and triggered
+        detection_count = TP
         total_detections = len(detections_for_rule)
-        triggered_flag = TP > 0
+        triggered_flag = TP > 0  # triggered only when TP > 0 (SOC standard)
 
+        # Reasoning summary
         reasoning = []
         reasoning.append(f"Generated synthetic logs for rule: {generated_count}")
         reasoning.append(f"TP={TP}, FP={FP}, FN={FN}")
@@ -209,6 +236,7 @@ class Classifier:
         if noise_ratio > 0.1:
             reasoning.append("High false-positive rate -> noisy rule.")
 
+        # Classification grade derived from RAW composite
         grade = classify_from_raw(composite)
 
         result = {
@@ -225,12 +253,13 @@ class Classifier:
             "f1": round(f1, 3),
             "structure_score": struct_score,
             "noise_ratio": round(noise_ratio, 3),
+            # raw composite (for classification) and transformed display score
             "raw_score": composite,
-            "score": transformed,
+            "score": transformed_score,
             "classification": grade,
             "reasoning": " | ".join(reasoning),
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            "detection_count": detection_count_tp,
+            "detection_count": detection_count,
             "total_detections": total_detections,
             "triggered": triggered_flag,
             "metrics": {
@@ -239,8 +268,13 @@ class Classifier:
                 "precision_delta": round(precision, 3)
             }
         }
+
+        if self.debug:
+            print(f"[DEBUG] Result for {name}: TP={TP}, FP={FP}, FN={FN}, raw_score={composite}, transformed={transformed_score}, class={grade}")
+
         return result
 
+# ---------------- CLI ----------------
 def parse_list(s: str):
     if not s:
         return []
@@ -254,6 +288,7 @@ def main():
     parser.add_argument("--changed-yara-rules", default="")
     parser.add_argument("--synthetic-logs", default="synthetic_logs/combined/all_logs.jsonl")
     parser.add_argument("--output-file", required=True)
+    parser.add_argument("--debug", action="store_true", help="Enable debug output (no-op if not used)")
     args = parser.parse_args()
 
     baseline = Path(args.baseline_results)
@@ -267,7 +302,7 @@ def main():
         print("No changed rules provided; exiting with minimal report")
         report = {"summary": {"total_rules": 0, "average_score": 0}, "rules": []}
     else:
-        cls = Classifier(baseline, current, synthetic)
+        cls = Classifier(baseline, current, synthetic, debug=args.debug)
         results = []
         for rp in changed:
             if not Path(rp).exists():
@@ -276,7 +311,10 @@ def main():
             res = cls.classify_rule(Path(rp))
             results.append(res)
 
+        # average of transformed (display) scores kept for UX/backwards compatibility
         avg_transformed = sum(r["score"] for r in results) / len(results) if results else 0.0
+
+        # by_grade derived from RAW composite classifications
         by_grade = {}
         for r in results:
             g = r.get("classification", "UNKNOWN")
@@ -290,6 +328,7 @@ def main():
             },
             "rules": results
         }
+
     outp = Path(args.output_file)
     outp.parent.mkdir(parents=True, exist_ok=True)
     outp.write_text(json.dumps(report, indent=2), encoding='utf-8')
