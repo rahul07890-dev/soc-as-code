@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 Generate synthetic logs from Sigma rules for testing
-Fully fixed version:
- - Prevents synthetic detections for new rules
- - Ensures new rules produce zero logs unless they truly match
+DELTA-BASED VALIDATION: Generates logs for ALL rules (old + new)
 """
 
 import os
@@ -26,6 +24,10 @@ except ImportError:
 
 
 def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 100):
+    """
+    Generate synthetic logs from ALL Sigma rules
+    NO FILTERING - generates logs for every rule to enable delta-based validation
+    """
     rules_path = Path(rules_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -34,6 +36,7 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
     print(f"    Rules directory: {rules_dir}")
     print(f"    Output directory: {output_dir}")
     print(f"    Logs per rule: {log_count}")
+    print(f"\n    🎯 DELTA-BASED MODE: Generating logs for ALL rules")
 
     # Load all rule files
     rule_files = list(rules_path.rglob('*.yml')) + list(rules_path.rglob('*.yaml'))
@@ -58,16 +61,11 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
 
     print(f"[+] Successfully loaded {len(all_rules)} rules")
 
-    # Detect NEW rules by checking if they're prefixed with "SIG-900"
-    # You can change this to ANY detection logic if needed.
-    def is_new_rule(rule_id: str) -> bool:
-        return rule_id.startswith("SIG-900")
-
     # Begin generation
     all_logs = []
     logs_per_rule = {}
 
-    print(f"\n[+] Generating synthetic logs...")
+    print(f"\n[+] Generating synthetic logs for ALL rules...")
 
     for i, rule in enumerate(all_rules):
         rule_id = rule.get("id", f"rule_{i}")
@@ -76,21 +74,15 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
         print(f"    [{i+1}/{len(all_rules)}] Processing: {rule_title} ({rule_id})")
 
         try:
-            # Distribute logs evenly (for OLD rules only)
+            # Distribute logs evenly across ALL rules
             rule_log_count = max(10, log_count // len(all_rules))
 
-            # -------------------------------
-            # 🚨 FIX: DO NOT GENERATE LOGS FOR NEW RULES
-            # -------------------------------
-            if is_new_rule(rule_id):
-                print(f"        → New rule detected. Synthetic logs disabled.")
-                logs = []
-            else:
-                logs = EnhancedLogGenerator.generate_for_sigma_rule(
-                    rule, count=rule_log_count
-                )
+            # Generate logs for EVERY rule
+            logs = EnhancedLogGenerator.generate_for_sigma_rule(
+                rule, count=rule_log_count
+            )
 
-            # Tag (only if logs exist)
+            # Tag logs with source rule info
             for log in logs:
                 log["_source_rule_id"] = rule_id
                 log["_source_rule_title"] = rule_title
