@@ -36,16 +36,30 @@ def check_results(results_dir: str, classification_report: str = None,
     print("\n" + "="*70)
 
 
-def get_risk_level(score: float) -> str:
-    """Return risk level based on normalized score"""
-    if score >= 80:
+def get_risk_level(score_percent: float) -> str:
+    """Return risk level based on normalized score percentage (0-100)"""
+    if score_percent >= 80:
         return "LOW RISK"
-    elif score >= 60:
+    elif score_percent >= 60:
         return "MODERATE RISK"
-    elif score >= 40:
+    elif score_percent >= 40:
         return "HIGH RISK"
     else:
         return "CRITICAL RISK"
+
+
+def get_classification_from_score(score_percent: float) -> str:
+    """Map a numeric score percentage (0-100) to a classification grade"""
+    if score_percent >= 80:
+        return "EXCELLENT"
+    elif score_percent >= 60:
+        return "GOOD"
+    elif score_percent >= 40:
+        return "NEUTRAL"
+    elif score_percent >= 20:
+        return "CONCERNING"
+    else:
+        return "BAD"
 
 
 def check_classification_report(report_file: str, fail_on_bad_rules: bool):
@@ -62,11 +76,12 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     print("-"*70)
     
     total_rules = summary.get('total_rules', 0)
-    avg_score = summary.get('average_score', 0)
+    avg_score = summary.get('average_score', 0)  # expected 0..1
     by_grade = summary.get('by_grade', {})
     
     print(f"\nTotal new rules analyzed: {total_rules}")
-    print(f"Average quality score: {(avg_score * 4 % 100) / 100}")
+    # print average as 0..1 like your example (0.52) and also show percent in brackets
+    print(f"Average quality score: {avg_score:.2f} ({avg_score * 100:.0f}/100)")
     
     if by_grade:
         print("\nGrade Distribution:")
@@ -84,16 +99,21 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
         
         for rule in sorted(rules, key=lambda r: r.get('score', 0), reverse=True):
             rule_name = rule.get('rule_name', 'Unknown')
-            classification = rule.get('classification', 'UNKNOWN')
-            score = rule.get('score', 0)
+            # Accept scores in either 0..1 or 0..100 range
+            raw_score = rule.get('score', 0)
+            if raw_score <= 1:
+                score_pct = raw_score * 100
+            else:
+                score_pct = float(raw_score)
+            # Classification derived from numeric score
+            classification = get_classification_from_score(score_pct)
             triggered = rule.get('triggered', False)
             detection_count = rule.get('detection_count', 0)
             reasoning = rule.get('reasoning', 'No reasoning provided')
             
-            icon = get_grade_icon(classification)
-            
-            print(f"\n{icon} {rule_name}")
-            print(f"   Classification: {classification} (Score: {score}/100)")
+            # no icon before rule name (user requested removal of rule icon)
+            print(f"\n{rule_name}")
+            print(f"   Classification: {classification} (Score: {score_pct:.0f}/100)")
             print(f"   Triggered: {'Yes' if triggered else 'No'} | Detections: {detection_count}")
             
             metrics = rule.get('metrics', {})
@@ -108,22 +128,25 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
                 if fp_delta != 0:
                     print(f"     • False Positives: {fp_delta:+}")
                 if precision_delta != 0:
+                    # precision_delta expected to be fraction; show percent change
                     print(f"     • Precision: {precision_delta:+.2%}")
             
             print(f"   Reasoning: {reasoning}")
     
     # -------------------------------
-    # NEW FINAL SCORE + RISK SECTION
+    # FINAL SCORE + RISK SECTION
     # -------------------------------
     print("\n" + "="*70)
-    # User-facing transformed score (display only)
-    display_score = (avg_score * 4) % 100
+    # display average score as a percentage (0-100)
+    display_score_pct = avg_score * 100
     
-    # Risk should be based on ORIGINAL score, not transformed one
-    risk_level = get_risk_level(avg_score)
+    # Risk should be based on percentage score
+    risk_level = get_risk_level(display_score_pct)
     
-    print("\n🎯 FINAL NORMALIZED SCORE")
-    print(f"   Score: {display_score:.2f}")
+    # Removed emoji/icon as requested
+    print("\nFINAL NORMALIZED SCORE")
+    print(f"   Score: {display_score_pct:.2f}")
+    print(f"   Risk Level: {risk_level}")
     print("\n" + "="*70)
 
 
@@ -226,7 +249,7 @@ def get_grade_icon(grade: str) -> str:
         'CONCERNING': '⚠️',
         'BAD': '❌'
     }
-    return icons.get(grade, '❓')
+    return icons.get(grade, '')
 
 
 def main():
@@ -242,7 +265,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
