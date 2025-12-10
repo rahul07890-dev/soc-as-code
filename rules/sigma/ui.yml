@@ -1,0 +1,16 @@
+title: Suspicious Binary Execution
+id: test-excellent-1
+status: stable
+logsource:
+  category: process_creation
+detection:
+  selection:
+    Image|endswith: 
+      - bad.exe
+      - malware.exe
+  condition: selection
+fields:
+  - CommandLine
+falsepositives:
+  - Rare legitimate tooling
+level: high

@@ -203,7 +203,8 @@ def generate_markdown_report(classification_report: str, output_file: str):
     print("REPORT SUMMARY")
     print("="*70)
     print(f"Total rules: {total_rules}")
-    print(f"Average score: {avg_score:.1f}/100")
+    print(f"Average score: (({avg_score:.1f} * 4) % 100) / 100")
+
     print("\nGrade distribution:")
     for grade, count in sorted(by_grade.items()):
         print(f"  {grade}: {count}")
@@ -233,4 +234,5 @@ def main():
 
 
 if __name__ == '__main__':
+
     main()

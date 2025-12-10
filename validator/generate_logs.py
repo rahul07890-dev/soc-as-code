@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Generate synthetic logs from Sigma rules for testing
-Fully fixed version:
- - Prevents synthetic detections for new rules
- - Ensures new rules produce zero logs unless they truly match
+generate_logs.py (improved)
+
+- Adds _synthetic_id (UUID) to each synthetic log
+- Adds _origin: "baseline" or "new" to each log
+- Adds _source_rule_id and _logsource to each log
+- Attempts safe generation for new rules, skips complex ones
+- Writes synthetic_logs_master.jsonl and metadata.json (compatible)
 """
 
 import os
@@ -12,17 +15,53 @@ import json
 import argparse
 from pathlib import Path
 from datetime import datetime
+from hashlib import sha256
+from uuid import uuid4
 
-# Import the log generator from validate_rules
+# Put repo root on path so validator.* imports still work
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
+    # your project-specific generator; kept for compatibility
     from validator.validate_rules import EnhancedLogGenerator
     from test import load_sigma_rules
-except ImportError:
+except Exception:
     from validate_rules import EnhancedLogGenerator
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from test import load_sigma_rules
+
+
+def rule_is_complex(rule: dict) -> bool:
+    """Heuristic to decide if rule is too complex to safely synthesize"""
+    detection = rule.get("detection", {})
+    cond = detection.get("condition", "") if isinstance(detection, dict) else ""
+
+    serialized = json.dumps(detection, default=str)
+    # regexes, re: or regexp are risky
+    if "re:" in serialized or "regexp" in serialized or "\\d" in serialized or ".*" in serialized:
+        return True
+
+    # Too many selection blocks leads to explosion
+    if isinstance(detection, dict):
+        selection_blocks = [k for k in detection.keys() if k != "condition"]
+        if len(selection_blocks) > 4:
+            return True
+
+    # Mixed and/or heavy correlation
+    if isinstance(cond, str) and (" and " in cond.lower() and " or " in cond.lower()):
+        return True
+
+    correlation_keywords = ["near", "sequence", "count", "within", "pipeline"]
+    if any(k in str(cond).lower() for k in correlation_keywords):
+        return True
+
+    return False
+
+
+def is_new_rule(rule_id: str) -> bool:
+    """Simple new-rule detector (same as your workflow). Update if you use a different convention."""
+    if not rule_id:
+        return False
+    return str(rule_id).startswith("SIG-900") or str(rule_id).upper().startswith("TEST-")
 
 
 def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 100):
@@ -30,138 +69,184 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n[+] Generating synthetic logs from Sigma rules")
-    print(f"    Rules directory: {rules_dir}")
-    print(f"    Output directory: {output_dir}")
-    print(f"    Logs per rule: {log_count}")
+    print(f"[+] Generating synthetic logs from Sigma rules")
+    print(f"    rules_dir: {rules_dir}")
+    print(f"    output_dir: {output_dir}")
+    print(f"    target log_count (total): {log_count}")
 
-    # Load all rule files
-    rule_files = list(rules_path.rglob('*.yml')) + list(rules_path.rglob('*.yaml'))
-    print(f"\n[+] Found {len(rule_files)} Sigma rule files")
+    rule_files = list(rules_path.rglob("*.yml")) + list(rules_path.rglob("*.yaml"))
+    print(f"[+] Found {len(rule_files)} rule files")
 
     all_rules = []
-    rule_metadata = {}
+    rules_by_id = {}
+    rules_metadata = {}
 
-    for rule_file in rule_files:
+    for rf in rule_files:
         try:
-            rules = load_sigma_rules(str(rule_file))
-            for rule in rules:
-                rule_id = rule.get('id', rule_file.stem)
-                all_rules.append(rule)
-                rule_metadata[rule_id] = {
-                    "path": str(rule_file),
-                    "title": rule.get("title", "Untitled"),
-                    "id": rule_id,
+            rules = load_sigma_rules(str(rf))
+            for r in rules:
+                rid = r.get("id", rf.stem)
+                all_rules.append(r)
+                rules_by_id[rid] = r
+                rules_metadata[rid] = {
+                    "path": str(rf),
+                    "title": r.get("title", "Untitled"),
+                    "id": rid,
+                    "complex_rule": rule_is_complex(r),
+                    "skipped": False,
+                    "generation_error": None,
+                    "detection_hash": None,
+                    "origin": "unknown",
+                    "generated_logs": 0,
+                    "positive_count": 0,
+                    "negative_count": 0,
                 }
         except Exception as e:
-            print(f"    ⚠️ Error loading {rule_file}: {e}")
+            print(f"⚠️ Error loading {rf}: {e}")
 
-    print(f"[+] Successfully loaded {len(all_rules)} rules")
+    print(f"[+] Total parsed rules: {len(all_rules)}")
+    if len(all_rules) == 0:
+        print("No rules found - exiting.")
+        return {}
 
-    # Detect NEW rules by checking if they're prefixed with "SIG-900"
-    # You can change this to ANY detection logic if needed.
-    def is_new_rule(rule_id: str) -> bool:
-        return rule_id.startswith("SIG-900")
+    # decide distribution: logs per rule (minimum 10)
+    # keep consistent with old behavior for compatibility
+    per_rule_default = max(10, log_count // max(1, len(all_rules)))
 
-    # Begin generation
     all_logs = []
     logs_per_rule = {}
 
-    print(f"\n[+] Generating synthetic logs...")
-
     for i, rule in enumerate(all_rules):
-        rule_id = rule.get("id", f"rule_{i}")
-        rule_title = rule.get("title", "Untitled")
+        rid = rule.get("id", f"rule_{i}")
+        title = rule.get("title", "Untitled")
+        detection = rule.get("detection", {})
 
-        print(f"    [{i+1}/{len(all_rules)}] Processing: {rule_title} ({rule_id})")
+        print(f"\n[{i+1}/{len(all_rules)}] Processing rule: {title} ({rid})")
 
+        # compute detection hash for metadata
         try:
-            # Distribute logs evenly (for OLD rules only)
-            rule_log_count = max(10, log_count // len(all_rules))
+            rules_metadata[rid]["detection_hash"] = sha256(
+                json.dumps(detection, sort_keys=True).encode()
+            ).hexdigest()
+        except Exception:
+            # keep safe - not fatal
+            rules_metadata[rid]["detection_hash"] = None
 
-            # -------------------------------
-            # 🚨 FIX: DO NOT GENERATE LOGS FOR NEW RULES
-            # -------------------------------
-            if is_new_rule(rule_id):
-                print(f"        → New rule detected. Synthetic logs disabled.")
-                logs = []
-            else:
-                logs = EnhancedLogGenerator.generate_for_sigma_rule(
-                    rule, count=rule_log_count
-                )
+        # determine origin
+        if is_new_rule(rid):
+            origin = "new"
+        else:
+            origin = "baseline"
+        rules_metadata[rid]["origin"] = origin
 
-            # Tag (only if logs exist)
-            for log in logs:
-                log["_source_rule_id"] = rule_id
-                log["_source_rule_title"] = rule_title
-
-            all_logs.extend(logs)
-            logs_per_rule[rule_id] = len(logs)
-
-            print(f"        Generated {len(logs)} logs")
-
-        except Exception as e:
-            print(f"        ⚠️ Error generating logs for {rule_title}: {e}")
+        # skip generation for complex new rules
+        if origin == "new" and rules_metadata[rid].get("complex_rule", False):
+            print("  → New rule marked complex: skipping synthetic generation (metadata flagged).")
+            logs = []
+            rules_metadata[rid]["skipped"] = True
+            rules_metadata[rid]["generated_logs"] = 0
+            logs_per_rule[rid] = 0
             continue
 
-    print(f"\n[+] Generated {len(all_logs)} total synthetic log events")
+        # Attempt generation (wrap in try to avoid breaking pipeline)
+        try:
+            rule_log_count = per_rule_default
+            logs = EnhancedLogGenerator.generate_for_sigma_rule(rule, count=rule_log_count) or []
+        except Exception as e:
+            print(f"  ⚠️ Generation error for {rid}: {e}")
+            logs = []
+            rules_metadata[rid]["skipped"] = True
+            rules_metadata[rid]["generation_error"] = str(e)
 
-    # Save master log file
-    master_log_file = output_path / "synthetic_logs_master.jsonl"
-    with open(master_log_file, "w") as f:
-        for log in all_logs:
-            f.write(json.dumps(log) + "\n")
+        # Tag logs (required fields so downstream code can map alerts -> synthetic logs)
+        pos = 0
+        neg = 0
+        for l in logs:
+            # ensure we have a dict
+            if not isinstance(l, dict):
+                continue
+            # unique synthetic id to tie detection -> exact synthetic log
+            sid = str(uuid4())
+            l["_synthetic_id"] = sid
+            l["_origin"] = origin
+            l["_source_rule_id"] = rid
+            l["_source_rule_title"] = title
+            # ensure _logsource exists
+            l.setdefault("_logsource", rule.get("logsource", {}))
+            # ensure _match_type exists (positive/negative)
+            if "_match_type" not in l:
+                # guess positive if fields match detection heuristics (keep safe: default positive)
+                l["_match_type"] = l.get("_match_type", "positive")
+            if l["_match_type"] == "positive":
+                pos += 1
+            elif l["_match_type"] == "negative":
+                neg += 1
 
-    print(f"[+] Saved master log file: {master_log_file}")
+        # metadata
+        rules_metadata[rid]["positive_count"] = pos
+        rules_metadata[rid]["negative_count"] = neg
+        rules_metadata[rid]["generated_logs"] = len(logs)
+        rules_metadata[rid]["skipped"] = False if logs else rules_metadata[rid]["skipped"]
 
-    # Save metadata
-    metadata = {
+        all_logs.extend(logs)
+        logs_per_rule[rid] = len(logs)
+
+        print(f"  → Generated {len(logs)} logs (pos={pos}, neg={neg}) - origin={origin}")
+
+    # write master jsonl (backwards compatible file name)
+    master_file = Path(output_path) / "synthetic_logs_master.jsonl"
+    with open(master_file, "w") as f:
+        for e in all_logs:
+            f.write(json.dumps(e) + "\n")
+    print(f"[+] Wrote master logs ({len(all_logs)}) -> {master_file}")
+
+    # Also write a separate "combined" single-line-per-log file to match your workflow
+    combined_dir = Path(output_path)
+    combined_file = combined_dir / "all_logs.jsonl"
+    with open(combined_file, "w") as f:
+        for e in all_logs:
+            f.write(json.dumps(e) + "\n")
+
+    # metadata
+    meta = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "total_logs": len(all_logs),
         "total_rules": len(all_rules),
         "logs_per_rule": logs_per_rule,
-        "rules_metadata": rule_metadata,
+        "rules_metadata": rules_metadata,
     }
+    meta_file = Path(output_path) / "metadata.json"
+    with open(meta_file, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"[+] Wrote metadata -> {meta_file}")
 
-    metadata_file = output_path / "metadata.json"
-    with open(metadata_file, "w") as f:
-        json.dump(metadata, f, indent=2)
-
-    print(f"[+] Saved metadata: {metadata_file}")
-
-    # Summary
-    positive_logs = sum(1 for log in all_logs if log.get("_match_type") == "positive")
-    negative_logs = sum(1 for log in all_logs if log.get("_match_type") == "negative")
-
+    # summary prints (friendly)
+    total_pos = sum(1 for l in all_logs if l.get("_match_type") == "positive")
+    total_neg = sum(1 for l in all_logs if l.get("_match_type") == "negative")
     print("\n" + "=" * 60)
     print("SYNTHETIC LOG GENERATION SUMMARY")
     print("=" * 60)
     print(f"Total rules processed: {len(all_rules)}")
     print(f"Total logs generated: {len(all_logs)}")
-    print(f"  • Positive (should match): {positive_logs}")
-    print(f"  • Negative (should not): {negative_logs}")
+    print(f"  • Positive: {total_pos}")
+    print(f"  • Negative: {total_neg}")
     print("=" * 60)
 
-    return metadata
+    return meta
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic logs from Sigma rules")
-    parser.add_argument("--rules-dir", required=True, help="Directory containing Sigma rules")
-    parser.add_argument("--output-dir", required=True, help="Output directory for synthetic logs")
-    parser.add_argument("--log-count", type=int, default=100, help="Total logs to generate")
-
+    parser.add_argument("--rules-dir", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--log-count", type=int, default=200)
     args = parser.parse_args()
 
     try:
         generate_synthetic_logs(args.rules_dir, args.output_dir, args.log_count)
-        print("\n✅ Synthetic log generation completed successfully")
-        sys.exit(0)
     except Exception as e:
-        print(f"\n❌ Error generating synthetic logs: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        print(f"ERROR: {e}")
+        raise
 
 
 if __name__ == "__main__":

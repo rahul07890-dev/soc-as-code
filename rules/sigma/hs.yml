@@ -1,0 +1,30 @@
+title: High Confidence Canary Execution Detector
+id: TEST-HIGHCONF-999
+status: experimental
+description: |
+  This rule is intentionally designed for testing rule quality scoring.
+  It uses unique, isolated fields to avoid collisions with baseline rules.
+
+logsource:
+  product: customapp
+  service: canarydaemon
+
+detection:
+  selection_unique:
+    CanaryEventID: 999001
+    CanarySignature:
+      - "HCNRY-EXEC-DETECTED"
+      - "HCNRY-UNIQUE-PATTERN-556677"
+    Metadata.FieldA: "TriggerPoint-ABC123"
+    Metadata.FieldB|startswith: "UniqueStart-XYZ"
+    Metadata.FieldC|endswith: "-ENDMARKER"
+
+  selection_nested:
+    Context.Process.Path|contains: "/var/tmp/hc_test_exec/"
+    Context.Process.Name: "hcexecutor"
+    Context.Alert.Type: "CANARY-HIGHCONF"
+    Context.Alert.Level: "CRITICAL"
+
+  condition: selection_unique and selection_nested
+
+level: critical

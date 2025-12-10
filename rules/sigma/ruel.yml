@@ -1,0 +1,15 @@
+title: Mixed Behavior Detection
+id: test-random-1
+status: test
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  sel1:
+    Image|endswith: ".sh"
+  sel2:
+    CommandLine|contains: "--debug"
+  condition: sel1 or sel2
+falsepositives:
+  - Admin scripts
+level: medium
