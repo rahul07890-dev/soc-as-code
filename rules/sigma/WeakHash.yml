@@ -1,0 +1,14 @@
+id: TEST-WEAK-HASH-001
+title: Specific Malware Hash Detection - NotPetya Variant
+status: test
+description: Detects a very specific malware hash
+logsource:
+  category: file_event
+  product: windows
+detection:
+  selection:
+    Hashes|contains: 
+      - 'SHA256=027cc450ef5f8c5f653329641ec1fed91f694e0d229928963b30f6b0d7d3a745'
+      - 'MD5=71b6a493388e7d0b40c83ce903bc6b04'
+  condition: selection
+level: critical
