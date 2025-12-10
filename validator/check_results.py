@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import json, sys, argparse
 from pathlib import Path
+from datetime import datetime
 
 def get_risk(score):
-    s = float(score)
+    try:
+        s = float(score)
+    except Exception:
+        s = 0.0
     if s >= 80: return "LOW RISK"
     if s >= 60: return "MODERATE RISK"
     if s >= 40: return "HIGH RISK"
@@ -43,7 +47,6 @@ def main():
             print(f"  Triggered (TP>0): {'Yes' if triggered else 'No'} | TP: {tp} | Total detections: {total}")
             print(f"  Reasoning: {r.get('reasoning')}")
     print("\n" + "="*70)
-    # final normalized score show display average
     avg = summary.get('average_score',0)
     print("\nFINAL SCORE")
     print(f"  Score: {avg:.2f}")
