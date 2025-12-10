@@ -22,16 +22,16 @@ def check_results(results_dir: str, classification_report: str = None,
     print("="*70)
     
     if has_classification:
-        print("\n🔍 CLASSIFICATION REPORT FOUND - Using comparison-based validation")
+        print("\nCLASSIFICATION REPORT FOUND - Using comparison-based validation")
         check_classification_report(classification_report, fail_on_bad_rules)
     
     # Traditional results (optional)
     results_file = results_path / 'validation_results.json'
     if results_file.exists():
-        print("\n📊 TRADITIONAL VALIDATION RESULTS")
+        print("\nTRADITIONAL VALIDATION RESULTS")
         check_traditional_results(results_file)
     else:
-        print("\n⚠️  No traditional validation results found")
+        print("\nNo traditional validation results found")
     
     print("\n" + "="*70)
 
@@ -39,13 +39,13 @@ def check_results(results_dir: str, classification_report: str = None,
 def get_risk_level(score: float) -> str:
     """Return risk level based on normalized score"""
     if score >= 80:
-        return "LOW RISK 🔵"
+        return "LOW RISK"
     elif score >= 60:
-        return "MODERATE RISK 🟡"
+        return "MODERATE RISK"
     elif score >= 40:
-        return "HIGH RISK 🟠"
+        return "HIGH RISK"
     else:
-        return "CRITICAL RISK 🔴"
+        return "CRITICAL RISK"
 
 
 def check_classification_report(report_file: str, fail_on_bad_rules: bool):
@@ -58,7 +58,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     rules = report.get('rules', [])
     
     print("\n" + "-"*70)
-    print("📈 CLASSIFICATION SUMMARY")
+    print("CLASSIFICATION SUMMARY")
     print("-"*70)
     
     total_rules = summary.get('total_rules', 0)
@@ -69,7 +69,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     print(f"Average quality score: {avg_score}/100")
     
     if by_grade:
-        print("\n📊 Grade Distribution:")
+        print("\nGrade Distribution:")
         grade_order = ['EXCELLENT', 'GOOD', 'NEUTRAL', 'CONCERNING', 'BAD']
         for grade in grade_order:
             if grade in by_grade:
@@ -79,7 +79,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     # Detailed rule classifications
     if rules:
         print("\n" + "-"*70)
-        print("🔍 DETAILED RULE CLASSIFICATIONS")
+        print("DETAILED RULE CLASSIFICATIONS")
         print("-"*70)
         
         for rule in sorted(rules, key=lambda r: r.get('score', 0), reverse=True):
@@ -133,21 +133,21 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     
     if fail_on_bad_rules:
         if bad_rules > 0:
-            print(f"\n❌ VALIDATION FAILED — {bad_rules} BAD rule(s)")
+            print(f"\nVALIDATION FAILED — {bad_rules} BAD rule(s)")
             sys.exit(1)
         elif concerning_rules > 0:
-            print(f"\n⚠️  VALIDATION PASSED WITH WARNINGS — {concerning_rules} concerning rule(s)")
+            print(f"\nVALIDATION PASSED WITH WARNINGS — {concerning_rules} concerning rule(s)")
             sys.exit(0)
         else:
-            print(f"\n✅ VALIDATION PASSED — All rules meet quality standard")
+            print(f"\nVALIDATION PASSED — All rules meet quality standard")
             sys.exit(0)
     
     else:
         if bad_rules > 0 or concerning_rules > 0:
-            print(f"\n⚠️  QUALITY CONCERNS DETECTED")
+            print(f"\nQUALITY CONCERNS DETECTED")
             print(f"   BAD: {bad_rules} | CONCERNING: {concerning_rules}")
         else:
-            print(f"\n✅ ALL RULES MEET QUALITY STANDARDS")
+            print(f"\nALL RULES MEET QUALITY STANDARDS")
         
         sys.exit(0)
 
@@ -167,8 +167,8 @@ def check_traditional_results(results_file: Path):
     
     print(f"Mode: {mode.upper()}")
     print(f"Total rules tested: {total_tested}")
-    print(f"✅ Passed: {total_passed}")
-    print(f"❌ Failed: {total_failed}")
+    print(f"Passed: {total_passed}")
+    print(f"Failed: {total_failed}")
     
     if total_tested > 0:
         print(f"Pass rate: {total_passed / total_tested * 100:.1f}%")
@@ -242,5 +242,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
