@@ -8,7 +8,7 @@ Behavior:
 - Displays the raw average (percent) in the summary (e.g. "13.00 (13/100)").
 - Applies transform: if value < 25 -> value * 4, else leave as-is (clamped to 100).
   - Final normalized score and rule classifications are based on the transformed values.
-- Keeps icons for the grade distribution only. No icons printed next to individual rules.
+- Uses grade buckets: WEAK (<50), NEUTRAL (50-79.99), STRONG (>=80)
 """
 import os
 import sys
@@ -57,16 +57,10 @@ def get_risk_level(score: float) -> str:
 
 
 def get_classification_from_score(score_percent: float) -> str:
-    """
-    Map a numeric score percentage (0-100) to a classification grade using
-    the 3-tier scheme requested by the user:
-      - < 80    -> WEAK
-      - 80-89.99 -> NEUTRAL
-      - 90-100  -> STRONG
-    """
-    if score_percent >= 90:
+    """Map a numeric score percentage (0-100) to a classification grade (WEAK/NEUTRAL/STRONG)."""
+    if score_percent >= 80:
         return "STRONG"
-    elif score_percent >= 80:
+    elif score_percent >= 50:
         return "NEUTRAL"
     else:
         return "WEAK"
@@ -74,9 +68,9 @@ def get_classification_from_score(score_percent: float) -> str:
 
 def get_grade_icon(grade: str) -> str:
     icons = {
-        'STRONG': '🌟',
+        'STRONG': '💪',
         'NEUTRAL': '➖',
-        'WEAK': '❌'
+        'WEAK': '⚠️'
     }
     return icons.get(grade, '')
 
@@ -141,10 +135,8 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
         # Prefer 'score' field (already transformed by classifier). If absent, normalize and transform.
         if 'score' in rule:
             score_val = normalize_to_percent(rule.get('score', 0))
-            # the report's 'score' may already be transformed; still apply transform to be safe (idempotent)
             transformed = transform_score(score_val)
         else:
-            # maybe report contains raw_score or raw composite; try to fall back
             raw_score = rule.get('raw_score', rule.get('raw', rule.get('composite', 0)))
             raw_pct = normalize_to_percent(raw_score)
             transformed = transform_score(raw_pct)
@@ -180,7 +172,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
             cnt = by_grade.get(grade, 0)
             if cnt:
                 icon = get_grade_icon(grade)
-                print(f"  {icon} {grade:12} : {cnt} rule(s)")
+                print(f"  {icon} {grade:8} : {cnt} rule(s)")
 
     # Detailed rule classifications (sorted by transformed score desc)
     if processed_rules:
@@ -224,21 +216,27 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     print(f"   Risk Level: {risk_level}")
     print("\n" + "=" * 70)
 
-    # Pass/fail logic based on by_grade (adapted to three-tier: treat WEAK as problematic)
+    # Pass/fail logic based on by_grade
     weak_rules = by_grade.get('WEAK', 0)
+    neutral_rules = by_grade.get('NEUTRAL', 0)
+    strong_rules = by_grade.get('STRONG', 0)
 
     if fail_on_bad_rules:
+        # treat any WEAK rules as fail if user requested strict
         if weak_rules > 0:
             print(f"\nVALIDATION FAILED — {weak_rules} WEAK rule(s)")
             sys.exit(1)
+        elif neutral_rules > 0:
+            print(f"\nVALIDATION PASSED WITH WARNINGS — {neutral_rules} NEUTRAL rule(s)")
+            sys.exit(0)
         else:
             print(f"\nVALIDATION PASSED — All rules meet quality standard")
             sys.exit(0)
 
     else:
-        if weak_rules > 0:
+        if weak_rules > 0 or neutral_rules > 0:
             print(f"\nQUALITY CONCERNS DETECTED")
-            print(f"   WEAK: {weak_rules}")
+            print(f"   WEAK: {weak_rules} | NEUTRAL: {neutral_rules} | STRONG: {strong_rules}")
         else:
             print(f"\nALL RULES MEET QUALITY STANDARDS")
 
@@ -309,18 +307,3 @@ def check_traditional_results(results_file: Path):
 
             if total_events > 0:
                 print(f"Alert rate: {total_alerts / total_events * 100:.2f}%")
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Check validation results')
-    parser.add_argument('--results-dir', default='validation_results')
-    parser.add_argument('--classification-report')
-    parser.add_argument('--fail-on-bad-rules', type=lambda x: x.lower() == 'true',
-                        default=False)
-    args = parser.parse_args()
-
-    check_results(args.results_dir, args.classification_report, args.fail_on_bad_rules)
-
-
-if __name__ == '__main__':
-    main()
