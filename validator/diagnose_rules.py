@@ -1,261 +1,222 @@
 #!/usr/bin/env python3
 """
-Diagnostic Tool: Shows exactly why a rule doesn't detect anything
-Run this BEFORE pushing to GitHub to debug your rule
+diagnose_rules.py
+
+Diagnose a single Sigma YAML rule file.
+
+Behavior:
+- Loads the YAML file and checks for parse errors.
+- Runs a set of common structural and semantic checks:
+  - required top-level keys (id, title, logsource, detection)
+  - logsource contains 'category' or 'product'
+  - detection is a mapping with at least one selection
+  - checks for suspicious field names (common typos)
+- Prints clear suggestions via suggest_fixes() when issues are found.
+- Returns exit code 0 when rule passes basic diagnostics, 1 otherwise.
+
+Usage:
+    python diagnose_rules.py /path/to/rule.yml [--debug]
 """
+
+import argparse
 import sys
-import json
-import yaml
 from pathlib import Path
+from typing import Dict, List, Tuple
+import yaml
+import re
 
-# Add validator to path
-sys.path.insert(0, str(Path(__file__).parent))
+REQUIRED_KEYS = ["id", "title", "logsource", "detection"]
+COMMON_FIELD_NAME_HINTS = {
+    "ProcessName": ["processname", "process_name", "Process_Name"],
+    "CommandLine": ["commandline", "command_line", "cmdline"],
+    "Image": ["image", "file_name", "exe"],
+    "SourceIp": ["src_ip", "source_ip", "SourceIP"],
+    "DestinationIp": ["dst_ip", "dest_ip", "destination_ip"],
+}
 
-from validator.validate_rules import UniversalLogGenerator
-from test import SigmaRule
 
-
-def diagnose_rule(rule_path: str):
-    """Diagnose why a rule isn't detecting"""
-    
-    print(f"\n{'='*70}")
-    print(f"🔬 DIAGNOSING RULE: {rule_path}")
-    print(f"{'='*70}\n")
-    
-    # Load rule
+def load_yaml(path: Path) -> Tuple[bool, Dict]:
+    """Load YAML rule file. Returns (ok, data_or_error_dict)."""
     try:
-        with open(rule_path, 'r') as f:
-            rule = yaml.safe_load(f)
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return True, data
     except Exception as e:
-        print(f"❌ ERROR: Cannot load rule: {e}")
-        return False
-    
-    # Show rule content
-    print("📋 RULE CONTENT:")
-    print(f"   Title: {rule.get('title', 'N/A')}")
-    print(f"   ID: {rule.get('id', 'N/A')}")
-    print(f"   Level: {rule.get('level', 'N/A')}")
-    
-    logsource = rule.get('logsource', {})
-    print(f"\n📂 LOGSOURCE:")
-    for k, v in logsource.items():
-        print(f"   {k}: {v}")
-    
-    detection = rule.get('detection', {})
-    print(f"\n🔍 DETECTION:")
-    print(f"   Condition: {detection.get('condition', 'N/A')}")
-    
-    # Show selections
-    for key, value in detection.items():
-        if key != 'condition' and isinstance(value, dict):
-            print(f"\n   Selection '{key}':")
-            for field, pattern in value.items():
-                print(f"      {field}: {pattern}")
-    
-    # Detect log type
-    log_type = UniversalLogGenerator._detect_log_type(logsource)
-    print(f"\n🎯 DETECTED LOG TYPE: {log_type}")
-    
-    # Generate sample logs
-    print(f"\n🧪 GENERATING SAMPLE LOGS...")
-    try:
-        sample_logs = UniversalLogGenerator.generate_for_rule(rule, count=5)
-        
-        if not sample_logs:
-            print("❌ ERROR: Log generator returned 0 logs!")
-            print("   This means the rule has no detection selections.")
-            return False
-        
-        print(f"✅ Generated {len(sample_logs)} sample logs")
-        
-        # Show positive samples
-        positive_logs = [l for l in sample_logs if l.get('_match_type') == 'positive']
-        print(f"\n📊 POSITIVE SAMPLES (should match): {len(positive_logs)}")
-        
-        if positive_logs:
-            print("\nSample Positive Log #1:")
-            sample = positive_logs[0].copy()
-            # Remove metadata for cleaner view
-            for key in list(sample.keys()):
-                if key.startswith('_'):
-                    del sample[key]
-            print(json.dumps(sample, indent=2))
-        
-        # Test if rule actually matches
-        print(f"\n🎯 TESTING RULE MATCHING...")
-        
-        sigma_rule = SigmaRule(rule)
-        matches = 0
-        
-        for log in positive_logs:
-            matched_fields = sigma_rule.matches(log)
-            if matched_fields is not None:
-                matches += 1
-        
-        print(f"   Positive logs that matched: {matches}/{len(positive_logs)}")
-        
-        if matches == 0:
-            print(f"\n❌ PROBLEM FOUND: Rule doesn't match its own generated logs!")
-            print(f"\n🔍 DEBUGGING INFO:")
-            
-            # Show what the rule expects
-            print(f"\n   Rule expects these fields:")
-            selections = {k: v for k, v in detection.items() if k != 'condition' and isinstance(v, dict)}
-            for sel_name, sel_fields in selections.items():
-                print(f"   Selection '{sel_name}':")
-                for field, pattern in sel_fields.items():
-                    print(f"      {field} = {pattern}")
-            
-            # Show what the log has
-            print(f"\n   Generated log has these fields:")
-            if positive_logs:
-                for field in sorted(positive_logs[0].keys()):
-                    if not field.startswith('_'):
-                        value = positive_logs[0][field]
-                        print(f"      {field} = {value}")
-            
-            # Suggest fixes
-            print(f"\n💡 POSSIBLE FIXES:")
-            print(f"   1. Check if field names match exactly (case-sensitive)")
-            print(f"   2. Verify the log generator understands your log source")
-            print(f"   3. Simplify the rule pattern to be less restrictive")
-            print(f"   4. Check if modifiers (|contains, |endswith, etc.) are needed")
-            
-            return False
-        
-        elif matches < len(positive_logs):
-            print(f"\n⚠️  WARNING: Only {matches}/{len(positive_logs)} positive logs matched")
-            print(f"   Some generated logs don't match the rule")
-            return True
-        
-        else:
-            print(f"\n✅ SUCCESS: All positive logs matched!")
-            print(f"   Your rule should work correctly in CI/CD")
-            return True
-        
-    except Exception as e:
-        print(f"\n❌ ERROR during log generation or matching: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        return False, {"error": str(e)}
 
 
-def suggest_fixes(rule_path: str):
-    """Suggest how to fix the rule"""
-    
-    with open(rule_path, 'r') as f:
-        rule = yaml.safe_load(f)
-    
-    logsource = rule.get('logsource', {})
-    detection = rule.get('detection', {})
-    
-    print(f"\n{'='*70}")
-    print(f"💡 SUGGESTIONS TO MAKE YOUR RULE DETECT:")
-    print(f"{'='*70}\n")
-    
-    # Suggestion 1: Use supported log sources
-    product = logsource.get('product', '').lower()
-    
-    supported = ['windows', 'linux', 'azure', 'aws', 'okta', 'onelogin', 'm365', 'proxy', 'network']
-    
-    if product not in supported:
-        print(f"1. ⚠️  LOG SOURCE SUPPORT")
-        print(f"   Your product: '{product}'")
-        print(f"   Supported products: {', '.join(supported)}")
-        print(f"   → Change to a supported product or it won't generate logs")
+def find_similar_field(wrong: str, candidates: List[str]) -> List[str]:
+    """Return candidate names that look similar to 'wrong' (case-insensitive substring match)."""
+    wrong_l = wrong.lower()
+    matches = []
+    for c in candidates:
+        if wrong_l in c.lower() or c.lower() in wrong_l:
+            matches.append(c)
+    return matches
+
+
+def basic_checks(data: Dict, path: Path, debug: bool = False) -> List[str]:
+    """Run basic checks and return a list of error messages (empty if no errors)."""
+    errors = []
+
+    if not isinstance(data, dict):
+        errors.append("Top-level YAML is not a mapping/dictionary.")
+        return errors
+
+    # Required keys
+    for k in REQUIRED_KEYS:
+        if k not in data:
+            errors.append(f"Missing required top-level key: '{k}'")
+
+    # logsource checks
+    logsource = data.get("logsource")
+    if isinstance(logsource, dict):
+        if not (logsource.get("category") or logsource.get("product")):
+            errors.append("logsource found but missing both 'category' and 'product'.")
     else:
-        print(f"1. ✅ Log source '{product}' is supported")
-    
-    # Suggestion 2: Use common fields
-    print(f"\n2. 📊 FIELD USAGE")
-    
-    selections = {k: v for k, v in detection.items() if k != 'condition' and isinstance(v, dict)}
-    if selections:
-        first_selection = list(selections.values())[0]
-        fields = list(first_selection.keys())
-        
-        # Common fields per log type
-        common_fields = {
-            'windows': ['EventID', 'CommandLine', 'Image', 'ProcessName', 'User'],
-            'linux': ['CommandLine', 'Image', 'User', 'TargetFilename'],
-            'azure': ['CategoryValue', 'ResourceProviderValue', 'OperationNameValue', 'ResourceId'],
-            'aws': ['eventName', 'eventSource', 'awsRegion', 'userIdentity'],
-            'okta': ['eventType', 'actor', 'target', 'outcome'],
-            'onelogin': ['event_type_id', 'user_name', 'actor_system'],
-            'proxy': ['c-uri', 'cs-host', 'c-uri-extension'],
-            'network': ['DestinationIp', 'DestinationPort', 'SourceIp']
-        }
-        
-        recommended = common_fields.get(product, [])
-        
-        print(f"   Your fields: {fields}")
-        if recommended:
-            print(f"   Recommended fields for '{product}': {recommended}")
-            
-            # Check if using recommended fields
-            using_common = any(f.split('|')[0] in recommended for f in fields)
-            if not using_common:
-                print(f"   ⚠️  You're not using common fields for this log source")
-                print(f"   → Try using: {', '.join(recommended[:3])}")
+        errors.append("logsource must be a mapping with 'category' or 'product'.")
+
+    # detection checks
+    detection = data.get("detection")
+    if not isinstance(detection, dict) or len(detection) == 0:
+        errors.append("detection must be a mapping with at least one selection block.")
+
+    # verify each selection block looks like a mapping of fields -> values
+    if isinstance(detection, dict):
+        for sel_name, sel_body in detection.items():
+            if sel_name.lower() in ("condition", "timeframe"):
+                # skip non-selection keys some authors add
+                continue
+            if not isinstance(sel_body, dict):
+                errors.append(f"detection selection '{sel_name}' is not a mapping.")
             else:
-                print(f"   ✅ Using common fields")
-    
-    # Suggestion 3: Simplify patterns
-    print(f"\n3. 🎯 PATTERN SIMPLICITY")
-    
-    complex_patterns = False
-    if selections:
-        first_selection = list(selections.values())[0]
-        for field, pattern in first_selection.items():
-            if isinstance(pattern, str):
-                if len(pattern) > 50 or pattern.count('*') > 3:
-                    print(f"   ⚠️  Complex pattern in '{field}': {pattern[:50]}...")
-                    complex_patterns = True
-    
-    if complex_patterns:
-        print(f"   → Simplify patterns to match more broadly")
-        print(f"   → Use wildcards sparingly")
+                # look for suspicious field names
+                for field in sel_body.keys():
+                    if not isinstance(field, str):
+                        continue
+                    # crude check: fields that look like integers are suspicious
+                    if re.fullmatch(r"\d+", field):
+                        errors.append(f"Field name '{field}' in selection '{sel_name}' looks like a numeric key (typo?).")
+
+                    # check against common hints
+                    for canonical, hints in COMMON_FIELD_NAME_HINTS.items():
+                        for hint in hints:
+                            if field.lower() == hint.lower():
+                                errors.append(
+                                    f"Field name '{field}' in selection '{sel_name}' may be a typo. Did you mean '{canonical}'?"
+                                )
+
+    # optional: id/title non-empty
+    rid = data.get("id")
+    if rid is None or (isinstance(rid, str) and rid.strip() == ""):
+        errors.append("Rule 'id' is missing or empty.")
+
+    title = data.get("title")
+    if title is None or (isinstance(title, str) and title.strip() == ""):
+        errors.append("Rule 'title' is missing or empty.")
+
+    if debug:
+        print(f"[DEBUG] basic_checks: found {len(errors)} issues for {path}")
+
+    return errors
+
+
+def suggest_fixes(path: Path, errors: List[str]) -> None:
+    """Print actionable suggestions based on found errors."""
+    print("\nSuggestions & possible fixes:")
+    for err in errors:
+        print(f" - {err}")
+        # heuristic suggestions
+        if "Missing required top-level key" in err:
+            missing = re.findall(r"'([^']+)'", err)
+            if missing:
+                k = missing[0]
+                if k == "logsource":
+                    print("   -> Add a 'logsource' mapping with at least 'category' or 'product'. Example:\n      logsource:\n        category: process\n        product: windows")
+                elif k == "detection":
+                    print("   -> Add a 'detection' block with named selections (selection1, selection2). Example:\n      detection:\n        selection1:\n          ProcessName: suspicious.exe\n        condition: selection1")
+                elif k == "id":
+                    print("   -> Add a unique 'id' field (e.g. SIG-2025-0001).")
+                elif k == "title":
+                    print("   -> Add a human-friendly 'title' field describing the detection.")
+        if "may be a typo" in err:
+            m = re.search(r"Did you mean '([^']+)'", err)
+            if m:
+                print(f"   -> Consider renaming the field to '{m.group(1)}' (or map fields in your ingestion).")
+        if "Top-level YAML is not a mapping" in err:
+            print("   -> Ensure the rule file contains a YAML mapping (key: value pairs) at the top level, not a list.")
+        if "yaml" in err.lower() or "parse" in err.lower():
+            print("   -> Check YAML syntax: proper indentation, colons, and quoting; run 'yamllint' if available.")
+        if "numeric key" in err:
+            print("   -> Replace numeric keys with proper field names (e.g., ProcessName, CommandLine).")
+
+    print("\nRun 'validate_rules.py --changed-sigma-rules <this-file>' for a quick re-check after edits.")
+
+
+def diagnose_rule(path: Path, debug: bool = False) -> bool:
+    """Load and run diagnostics on a single rule file. Returns True if passes, False otherwise."""
+    ok, data_or_err = load_yaml(path)
+    if not ok:
+        err = data_or_err.get("error", "Unknown error while parsing YAML")
+        print(f"❌ YAML parse error in {path}: {err}")
+        if debug:
+            print(f"[DEBUG] full parse error: {err}")
+        return False
+
+    data = data_or_err
+    errors = basic_checks(data, path, debug=debug)
+
+    if errors:
+        print(f"\n❌ DIAGNOSIS: {len(errors)} issue(s) found in {path}")
+        suggest_fixes(path, errors)
+        return False
+
+    # Passed checks
+    print(f"\n✅ DIAGNOSIS OK: {path} passed basic diagnostics")
+    # Extra helpful output: show top-level id/title/logsource summary
+    rid = data.get("id", "")
+    title = data.get("title", "")
+    logsource = data.get("logsource", {})
+    print(f" - id: {rid}")
+    print(f" - title: {title}")
+    if isinstance(logsource, dict):
+        print(f" - logsource: {logsource}")
     else:
-        print(f"   ✅ Patterns look reasonable")
-    
-    # Suggestion 4: Test locally first
-    print(f"\n4. 🧪 TESTING WORKFLOW")
-    print(f"   Before pushing to GitHub:")
-    print(f"   → Run: python validator/diagnose_rule.py {rule_path}")
-    print(f"   → Verify it shows 'SUCCESS: All positive logs matched!'")
-    print(f"   → Only then commit and push")
-    
-    print(f"\n{'='*70}\n")
+        print(" - logsource: (unexpected format)")
+
+    # Optionally show detection summary
+    det = data.get("detection", {})
+    if isinstance(det, dict):
+        selections = [k for k in det.keys() if k.lower() != "condition"]
+        print(f" - selection blocks: {len(selections)} ({', '.join(selections)})" if selections else " - selection blocks: 0")
+
+    return True
 
 
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(description='Diagnose a Sigma rule')
-    parser.add_argument('rule_path', help='Path to rule file')
-    parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+def main():
+    parser = argparse.ArgumentParser(description="Diagnose a single Sigma rule file")
+    parser.add_argument("rule_path", help="Path to the Sigma YAML rule file to diagnose")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
-    rule_path = args.rule_path
+    rule_path = Path(args.rule_path)
 
-    if getattr(args, 'debug', False):
+    if args.debug:
         print("[DEBUG] Debug mode enabled for diagnose_rules.py")
+        print(f"[DEBUG] rule_path={rule_path}")
 
-    from pathlib import Path
-    import sys
-
-    if not Path(rule_path).exists():
+    if not rule_path.exists():
         print(f"❌ ERROR: Rule file not found: {rule_path}")
         sys.exit(1)
 
-    success = diagnose_rule(rule_path)
+    ok = diagnose_rule(rule_path, debug=args.debug)
 
-    if not success:
-        suggest_fixes(rule_path)
+    if not ok:
+        print("\nExiting with failure (1) — fix the issues above and re-run.")
         sys.exit(1)
     else:
-        print(f"
-{'='*70}")
-        print(f"✅ DIAGNOSIS COMPLETE: Rule is working!")
-        print(f"{'='*70}
-")
         sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
