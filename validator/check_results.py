@@ -119,7 +119,8 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
 
     # Print the displayed average (original percent)
     print(f"\nTotal new rules analyzed: {total_rules}")
-    print(f"Average quality score:" ({avg_pct:.0f}*4))
+    print(f"Average quality score: {avg_pct * 4}")
+
 
     # Process each rule: normalize, transform, classify. Build processed rules list and grade counts.
     processed_rules: List[Dict[str, Any]] = []
@@ -306,5 +307,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
