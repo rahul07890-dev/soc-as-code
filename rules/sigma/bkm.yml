@@ -1,0 +1,16 @@
+title: Weak Rule - Overly Broad Keyword Match
+id: SIG-WEAK-001
+status: experimental
+description: Matches common words found in benign logs.
+logsource:
+  product: windows
+  category: process_creation
+detection:
+  selection:
+    CommandLine|contains:
+      - "error"
+      - "fail"
+  condition: selection
+falsepositives:
+  - Many. Extremely high.
+level: low
