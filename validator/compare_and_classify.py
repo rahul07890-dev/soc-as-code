@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 """
-compare_and_classify.py - SOC-friendly final
+compare_and_classify.py
 
-Key points:
-- Raw composite used for classification (no grade inflation).
-- Transformed score is display-only: if raw < 25 -> raw*4, else raw.
-- New weights: F1=0.60, Noise term weight=0.25, Structure=0.15.
+- Classifies rules based on raw composite (detection quality).
+- Display score is transformed (if raw < 25 -> raw*4), but classification uses raw.
 - detection_count = TP, total_detections = total hits, triggered = TP > 0.
-- Outputs both raw_score and score for consumers.
+- Intended to be run across all rules (e.g., rules/sigma/*).
 """
-
 import argparse
 import json
 import yaml
 from pathlib import Path
 from collections import defaultdict
-from typing import Dict, Any, List
 from datetime import datetime
 
 def load_json(path: Path):
@@ -26,13 +22,14 @@ def load_json(path: Path):
     except Exception:
         return []
 
-def load_synthetic_logs(path: Path) -> List[Dict[str,Any]]:
+def load_synthetic_logs(path: Path):
     logs = []
     if not path.exists():
         return logs
     with open(path, 'r', encoding='utf-8') as fh:
         for line in fh:
-            if not line.strip():
+            line=line.strip()
+            if not line:
                 continue
             try:
                 logs.append(json.loads(line))
@@ -40,7 +37,7 @@ def load_synthetic_logs(path: Path) -> List[Dict[str,Any]]:
                 continue
     return logs
 
-def extract_rule_identifiers_from_yaml(path: Path) -> Dict[str,str]:
+def extract_rule_identifiers_from_yaml(path: Path):
     res = {"id": None, "title": None, "filename": path.stem}
     try:
         y = yaml.safe_load(path.read_text(encoding='utf-8'))
@@ -58,7 +55,7 @@ def clamp(n, a=0, b=100):
         return a
     return max(a, min(b, n))
 
-def structure_score_for_rule(rule_path: Path) -> int:
+def structure_score_for_rule(rule_path: Path):
     try:
         y = yaml.safe_load(rule_path.read_text(encoding='utf-8'))
     except Exception:
@@ -66,6 +63,7 @@ def structure_score_for_rule(rule_path: Path) -> int:
     detection = y.get("detection", {}) if isinstance(y, dict) else {}
     cond = detection.get("condition", "") if isinstance(detection, dict) else ""
     serialized = json.dumps(detection, default=str)
+
     score = 50
     if "re:" in serialized or "regexp" in serialized or ".*" in serialized or "\\d" in serialized:
         score -= 25
@@ -76,7 +74,6 @@ def structure_score_for_rule(rule_path: Path) -> int:
         score -= 10
     if " and " in str(cond).lower():
         score += 10
-    # more fields used -> better
     field_count = 0
     for sel in selections:
         block = detection.get(sel, {})
@@ -95,7 +92,6 @@ def transform_score(score: float) -> float:
     return float(clamp(round(s, 2), 0, 100))
 
 def classify_from_raw(raw_pct: float) -> str:
-    # thresholds tuned for SOC separation
     if raw_pct >= 75:
         return "EXCELLENT"
     if raw_pct >= 60:
@@ -111,13 +107,11 @@ class Classifier:
         self.baseline_dets = load_json(baseline_dir / "detections.json") if baseline_dir else []
         self.current_dets = load_json(current_dir / "detections.json") if current_dir else []
         self.synthetic_logs = load_synthetic_logs(synthetic_combined_file)
-        # synthetic id -> log
         self.synthetic_map = {}
         for l in self.synthetic_logs:
             sid = l.get("_synthetic_id")
             if sid:
                 self.synthetic_map[sid] = l
-        # index current detections by synthetic id if present
         self.indexed_current = defaultdict(list)
         for det in self.current_dets:
             raw = det.get("raw") or det.get("log") or det.get("_raw") or det.get("original_event") or {}
@@ -129,7 +123,7 @@ class Classifier:
             if sid:
                 self.indexed_current[sid].append(det)
 
-    def classify_rule(self, rule_path: Path) -> Dict[str,Any]:
+    def classify_rule(self, rule_path: Path):
         ids = extract_rule_identifiers_from_yaml(rule_path)
         rid = ids.get("id")
         title = ids.get("title")
@@ -140,7 +134,6 @@ class Classifier:
             logs_for_rule = [l for l in self.synthetic_logs if l.get("_origin") == "new" and l.get("_source_rule_id") in {name, title}]
         generated_count = len(logs_for_rule)
 
-        # collect matched synthetic ids by any detection
         matched_sids = set()
         detections_for_rule = []
         for det in self.current_dets:
@@ -173,7 +166,6 @@ class Classifier:
             else:
                 pass
 
-        # attribute TP/FP by comparing matched_sids to synthetic map
         tp_sids = set()
         fp_sids = set()
         for sid in matched_sids:
@@ -197,10 +189,9 @@ class Classifier:
         struct_score = structure_score_for_rule(rule_path)
         noise_ratio = (FP / (TP + FP)) if (TP + FP) > 0 else 0.0
 
-        # NEW weights: emphasize F1 and noise
+        # weights tuned for SOC sensitivity
         composite = (f1 * 100.0) * 0.60 + (1 - noise_ratio) * 100.0 * 0.25 + (struct_score) * 0.15
         composite = clamp(round(composite, 2), 0, 100)
-
         transformed = transform_score(composite)
 
         detection_count_tp = TP
@@ -236,7 +227,7 @@ class Classifier:
             "noise_ratio": round(noise_ratio, 3),
             "raw_score": composite,
             "score": transformed,
-            "classification": grade,   # based on raw composite
+            "classification": grade,
             "reasoning": " | ".join(reasoning),
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "detection_count": detection_count_tp,
@@ -248,7 +239,6 @@ class Classifier:
                 "precision_delta": round(precision, 3)
             }
         }
-
         return result
 
 def parse_list(s: str):
@@ -287,8 +277,6 @@ def main():
             results.append(res)
 
         avg_transformed = sum(r["score"] for r in results) / len(results) if results else 0.0
-
-        # by_grade based on raw_score already set in results
         by_grade = {}
         for r in results:
             g = r.get("classification", "UNKNOWN")
@@ -297,12 +285,11 @@ def main():
         report = {
             "summary": {
                 "total_rules": len(results),
-                "average_score": round(avg_transformed, 2),  # display average (transformed)
+                "average_score": round(avg_transformed, 2),
                 "by_grade": by_grade
             },
             "rules": results
         }
-
     outp = Path(args.output_file)
     outp.parent.mkdir(parents=True, exist_ok=True)
     outp.write_text(json.dumps(report, indent=2), encoding='utf-8')
