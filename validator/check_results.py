@@ -116,14 +116,18 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     # NEW FINAL SCORE + RISK SECTION
     # -------------------------------
     print("\n" + "="*70)
-    final_score = (avg_score * 4) % 100
-    risk_level = get_risk_level(final_score)
-
+    # User-facing transformed score (display only)
+    display_score = (avg_score * 4) % 100
+    
+    # Risk should be based on ORIGINAL score, not transformed one
+    risk_level = get_risk_level(avg_score)
+    
     print("\n🎯 FINAL NORMALIZED SCORE")
     print(f"   Raw Average Score       : {avg_score}/100")
-    print(f"   Final Score (×4 mod 100): {final_score:.2f}")
-    print(f"   Risk Level              : {risk_level}")
+    print(f"   Display Score (×4 mod 100): {display_score:.2f}")
+    print(f"   Risk Level (Based on Raw Score): {risk_level}")
     print("\n" + "="*70)
+
 
     # Pass/fail logic
     bad_rules = by_grade.get('BAD', 0)
@@ -240,3 +244,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
