@@ -22,16 +22,14 @@ This script:
 
 import argparse
 import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 # -----------------------
-# Tunable thresholds
+# Default tunable thresholds (can be overridden on CLI)
 # -----------------------
-STRONG_DELTA = 10         # if total alerts increase by >= STRONG_DELTA -> STRONG
-MIN_RULE_CONTRIBUTION = 3 # rule must contribute at least this many detections to be considered meaningful
-NEUTRAL_UPPER = STRONG_DELTA - 1  # anything between 1 and STRONG_DELTA-1 considered NEUTRAL (subject to per-rule contrib)
+DEFAULT_STRONG_DELTA = 10         # if total alerts increase by >= STRONG_DELTA -> STRONG
+DEFAULT_MIN_RULE_CONTRIBUTION = 3 # rule must contribute at least this many detections to be considered meaningful
 # -----------------------
 
 def read_json_file(path: Path) -> Any:
@@ -79,6 +77,7 @@ def extract_detection_count(item: Dict) -> int:
      - 'matches' -> number or list
      - 'detections' -> number
      - 'count' -> number
+     - 'results' -> list length
     """
     if not isinstance(item, dict):
         return 0
@@ -88,7 +87,6 @@ def extract_detection_count(item: Dict) -> int:
             val = item[key]
             if isinstance(val, int):
                 return val
-            # sometimes 'matches' can be list
             if isinstance(val, list):
                 return len(val)
             try:
@@ -96,9 +94,8 @@ def extract_detection_count(item: Dict) -> int:
                 return int(val)
             except Exception:
                 pass
-    # boolean matched -> count as 1
+    # boolean matched -> count as 1 (or use matched_count if present)
     if item.get('matched') is True:
-        # if there is a 'matched_count' use it
         if 'matched_count' in item and isinstance(item['matched_count'], int):
             return item['matched_count']
         return 1
@@ -119,7 +116,7 @@ def find_rule_detection_in_results(rule_identifier: str, results: List[Dict]) ->
      - look for 'rule_id', 'id' fields matching the identifier.
      - look for 'rule_path' or 'rule_name' or filename match.
      - if identifier is a filename, compare suffixes and stems.
-     - fallback: try substring match in 'rule_title' or 'rule_path'
+     - fallback: substring match in json text.
     Returns aggregated detection_count for matching entries.
     """
     total = 0
@@ -128,7 +125,7 @@ def find_rule_detection_in_results(rule_identifier: str, results: List[Dict]) ->
     for item in results:
         if not isinstance(item, dict):
             continue
-        # possible fields to check
+        # gather candidate fields
         checks = []
         for k in ('rule_id', 'id', 'rule_name', 'rule_title', 'rule_path', 'path', 'name'):
             if k in item and item[k] is not None:
@@ -157,13 +154,14 @@ def find_rule_detection_in_results(rule_identifier: str, results: List[Dict]) ->
             pass
     return total
 
-def classify_rule(baseline_total: int, current_total: int, rule_detection_count: int) -> Tuple[str,int,str]:
+def classify_rule(baseline_total: int, current_total: int, rule_detection_count: int,
+                  strong_delta: int, min_rule_contrib: int) -> Tuple[str,int,str]:
     """
     Returns (grade, score, reasoning)
     grade in {'STRONG','NEUTRAL','WEAK','CONCERNING'}
+    Uses provided thresholds (strong_delta, min_rule_contrib).
     """
     delta = current_total - baseline_total
-
     metrics_msg = f"(baseline_total={baseline_total}, current_total={current_total}, delta={delta}, rule_contrib={rule_detection_count})"
 
     if delta < 0:
@@ -176,9 +174,9 @@ def classify_rule(baseline_total: int, current_total: int, rule_detection_count:
         reasoning = f'No change in total alerts after adding the new rule. {metrics_msg}'
     else:
         # delta > 0
-        if delta >= STRONG_DELTA:
+        if delta >= strong_delta:
             # large positive improvement
-            if rule_detection_count >= MIN_RULE_CONTRIBUTION:
+            if rule_detection_count >= min_rule_contrib:
                 grade = 'STRONG'
                 score = 90
                 reasoning = f'Rule materially increased total alerts by {delta} and contributed {rule_detection_count} detections. {metrics_msg}'
@@ -188,7 +186,7 @@ def classify_rule(baseline_total: int, current_total: int, rule_detection_count:
                 reasoning = f'Total alerts increased by {delta}, but this specific rule contributed only {rule_detection_count} detections. Consider review. {metrics_msg}'
         else:
             # small positive improvement -> neutral if rule contributes decently, else weak
-            if rule_detection_count >= MIN_RULE_CONTRIBUTION:
+            if rule_detection_count >= min_rule_contrib:
                 grade = 'NEUTRAL'
                 score = 50
                 reasoning = f'Minor increase in total alerts (delta={delta}). Rule contributes {rule_detection_count} detections — neutral. {metrics_msg}'
@@ -201,12 +199,12 @@ def classify_rule(baseline_total: int, current_total: int, rule_detection_count:
     score = max(0, min(100, score))
     return grade, score, reasoning
 
-def build_report(baseline_results: List[Dict], current_results: List[Dict], changed_rules: List[str]) -> Dict:
+def build_report(baseline_results: List[Dict], current_results: List[Dict], changed_rules: List[str],
+                 strong_delta: int, min_rule_contrib: int) -> Dict:
     baseline_total = sum_total_detections(baseline_results)
     current_total = sum_total_detections(current_results)
     delta = current_total - baseline_total
 
-    # prepare baseline+current metrics summary
     summary = {
         'baseline_total': baseline_total,
         'current_total': current_total,
@@ -218,7 +216,8 @@ def build_report(baseline_results: List[Dict], current_results: List[Dict], chan
     per_rule_reports = []
     for rule in changed_rules:
         rule_det_current = find_rule_detection_in_results(rule, current_results)
-        grade, score, reasoning = classify_rule(baseline_total, current_total, rule_det_current)
+        grade, score, reasoning = classify_rule(baseline_total, current_total, rule_det_current,
+                                               strong_delta, min_rule_contrib)
         per_rule_reports.append({
             'rule_identifier': rule,
             'rule_detection_count': rule_det_current,
@@ -235,7 +234,6 @@ def build_report(baseline_results: List[Dict], current_results: List[Dict], chan
 def parse_changed_rules(arg: str) -> List[str]:
     if not arg:
         return []
-    # accept comma separated or newline separated
     parts = []
     for part in arg.split(','):
         part = part.strip()
@@ -250,16 +248,14 @@ def main():
     parser.add_argument('--current', '-c', required=True, help="Path to current results (json file or directory of json files)")
     parser.add_argument('--changed-rules', '-r', default='', help="Comma-separated list of changed/new rule filenames or ids (e.g. rules/foo.yml,rule-id-123)")
     parser.add_argument('--output', '-o', required=True, help="Output JSON file path for classification report")
-    parser.add_argument('--strong-delta', type=int, default=STRONG_DELTA, help="Threshold for STRONG classification (default: {})".format(STRONG_DELTA))
-    parser.add_argument('--min-rule-contrib', type=int, default=MIN_RULE_CONTRIBUTION, help="Minimum per-rule detections to be considered meaningful (default: {})".format(MIN_RULE_CONTRIBUTION))
+    parser.add_argument('--strong-delta', type=int, default=DEFAULT_STRONG_DELTA, help=f"Threshold for STRONG classification (default: {DEFAULT_STRONG_DELTA})")
+    parser.add_argument('--min-rule-contrib', type=int, default=DEFAULT_MIN_RULE_CONTRIBUTION, help=f"Minimum per-rule detections to be considered meaningful (default: {DEFAULT_MIN_RULE_CONTRIBUTION})")
 
     args = parser.parse_args()
 
-    # allow overriding thresholds from CLI
-    global STRONG_DELTA, MIN_RULE_CONTRIBUTION
-    STRONG_DELTA = int(args.strong_delta)
-    MIN_RULE_CONTRIBUTION = int(args.min_rule_contrib)
-    NEUTRAL_UPPER = STRONG_DELTA - 1
+    # thresholds are local variables (no globals)
+    strong_delta = int(args.strong_delta)
+    min_rule_contrib = int(args.min_rule_contrib)
 
     try:
         baseline_results = load_results(args.baseline)
@@ -277,13 +273,13 @@ def main():
     if not changed_rules:
         print("Warning: no changed-rules provided. The script will still compute baseline/current totals and delta, but per-rule classification will be empty.")
 
-    report = build_report(baseline_results, current_results, changed_rules)
+    report = build_report(baseline_results, current_results, changed_rules, strong_delta, min_rule_contrib)
 
     # add runtime metadata
     report_meta = {
         'thresholds': {
-            'STRONG_DELTA': STRONG_DELTA,
-            'MIN_RULE_CONTRIBUTION': MIN_RULE_CONTRIBUTION
+            'STRONG_DELTA': strong_delta,
+            'MIN_RULE_CONTRIBUTION': min_rule_contrib
         }
     }
     report['meta'] = report_meta
@@ -309,4 +305,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
