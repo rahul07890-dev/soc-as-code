@@ -1,9 +1,0 @@
-# rules/sigma/my_detection.yml v1
-title: "My Awesome Detection"
-id: "SIG-001234"
-level: high
-detection:
-  selection:
-    EventID: 4688
-    CommandLine: "*malicious*"
-  condition: selection

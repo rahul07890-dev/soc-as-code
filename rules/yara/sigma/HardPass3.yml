@@ -1,7 +1,0 @@
-title: "Detection - Multiple Wildcard Test"
-id: "SIG-MEDIUM-001"
-level: high
-detection:
-  selection:
-    CommandLine: "*pow?rshell* -e*"
-  condition: selection

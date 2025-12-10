@@ -1,7 +1,0 @@
-title: "Detection - Regex Pattern Test"
-id: "SIG-HARD-001"
-level: critical
-detection:
-  selection:
-    CommandLine: ".*powershell.*-encodedcommand.*"
-  condition: selection
