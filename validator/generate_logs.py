@@ -7,6 +7,7 @@ generate_logs.py (improved)
 - Adds _source_rule_id and _logsource to each log
 - Attempts safe generation for new rules, skips complex ones
 - Writes synthetic_logs_master.jsonl and metadata.json (compatible)
+- New: option/heuristics to treat rules in a 'new' rules directory as new (fixes cases where rule id is a UUID)
 """
 
 import os
@@ -64,7 +65,7 @@ def is_new_rule(rule_id: str) -> bool:
     return str(rule_id).startswith("SIG-900") or str(rule_id).upper().startswith("TEST-")
 
 
-def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 100):
+def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 100, mark_all_new: bool = False):
     rules_path = Path(rules_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -85,6 +86,7 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
         try:
             rules = load_sigma_rules(str(rf))
             for r in rules:
+                # Use rule id if present, otherwise synthesize an id from filename
                 rid = r.get("id", rf.stem)
                 all_rules.append(r)
                 rules_by_id[rid] = r
@@ -110,11 +112,14 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
         return {}
 
     # decide distribution: logs per rule (minimum 10)
-    # keep consistent with old behavior for compatibility
     per_rule_default = max(10, log_count // max(1, len(all_rules)))
 
     all_logs = []
     logs_per_rule = {}
+
+    # Infer whether the rules_dir looks like a 'new' rules directory (heuristic)
+    rules_dir_name = rules_path.name.lower()
+    heuristically_new_dir = any(x in rules_dir_name for x in ("new", "new_rules", "new_rules_temp", "added"))
 
     for i, rule in enumerate(all_rules):
         rid = rule.get("id", f"rule_{i}")
@@ -133,10 +138,15 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
             rules_metadata[rid]["detection_hash"] = None
 
         # determine origin
-        if is_new_rule(rid):
+        # Priority:
+        # 1) If caller asked to mark all rules as new (explicit flag)
+        # 2) Heuristic based on rules_dir name (e.g., "new_rules_temp")
+        # 3) is_new_rule() detection based on rule id/title
+        if mark_all_new or heuristically_new_dir:
             origin = "new"
         else:
-            origin = "baseline"
+            origin = "new" if is_new_rule(rid) else "baseline"
+
         rules_metadata[rid]["origin"] = origin
 
         # skip generation for complex new rules
@@ -168,6 +178,7 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
             # unique synthetic id to tie detection -> exact synthetic log
             sid = str(uuid4())
             l["_synthetic_id"] = sid
+            # IMPORTANT: ensure origin properly set to "new" for new rules
             l["_origin"] = origin
             l["_source_rule_id"] = rid
             l["_source_rule_title"] = title
@@ -195,7 +206,7 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
 
     # write master jsonl (backwards compatible file name)
     master_file = Path(output_path) / "synthetic_logs_master.jsonl"
-    with open(master_file, "w") as f:
+    with open(master_file, "w", encoding="utf-8") as f:
         for e in all_logs:
             f.write(json.dumps(e) + "\n")
     print(f"[+] Wrote master logs ({len(all_logs)}) -> {master_file}")
@@ -203,7 +214,7 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
     # Also write a separate "combined" single-line-per-log file to match your workflow
     combined_dir = Path(output_path)
     combined_file = combined_dir / "all_logs.jsonl"
-    with open(combined_file, "w") as f:
+    with open(combined_file, "w", encoding="utf-8") as f:
         for e in all_logs:
             f.write(json.dumps(e) + "\n")
 
@@ -216,7 +227,7 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
         "rules_metadata": rules_metadata,
     }
     meta_file = Path(output_path) / "metadata.json"
-    with open(meta_file, "w") as f:
+    with open(meta_file, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     print(f"[+] Wrote metadata -> {meta_file}")
 
@@ -240,10 +251,12 @@ def main():
     parser.add_argument("--rules-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--log-count", type=int, default=200)
+    parser.add_argument("--mark-all-new", action="store_true",
+                        help="Treat all rules in rules-dir as NEW (sets _origin='new'). Useful when rules_dir contains new rules.")
     args = parser.parse_args()
 
     try:
-        generate_synthetic_logs(args.rules_dir, args.output_dir, args.log_count)
+        generate_synthetic_logs(args.rules_dir, args.output_dir, args.log_count, mark_all_new=args.mark_all_new)
     except Exception as e:
         print(f"ERROR: {e}")
         raise
