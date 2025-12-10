@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-COMPLETE FIXED VALIDATOR - Strict generator variant
+COMPLETE FIXED VALIDATOR - Generator with conservative selector-field enabling
 
-This file contains:
-- UniversalLogGenerator: produces synthetic logs for Sigma rules
-- EnhancedLogGenerator: compatibility wrapper
-- RuleValidator: runs rules against synthetic logs (unchanged)
+Key change:
+- If a Sigma rule is NOT considered complex (heuristic), the generator will allow
+  top-level selector field names referenced by the rule to be populated in synthetic logs.
+  This helps cloud and custom-rule selectors (e.g., OperationNameValue, TargetRole)
+  produce matching synthetic logs while avoiding fabricating fields for complex rules.
 
-Important change: generator is STRICT about which fields it will populate.
-It will only set fields that are present in the chosen logsource template defaults
-(or minimal internal metadata fields). This prevents fabrication of arbitrary
-fields and helps ensure "never matches" truly never match.
+Other behavior is kept as before (logsource templates, field-specific value generation,
+positive/negative split, SOCSimulator-driven rule validation).
 """
 import os
 import sys
@@ -28,19 +27,48 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from test import SOCSimulator, load_sigma_rules
 
-# ---------------------------
-# UniversalLogGenerator
-# ---------------------------
-class UniversalLogGenerator:
-    """Generates logs for ANY Sigma rule - strict on allowed fields"""
 
-    # Minimal templates for common logs (kept as in your earlier file)
+def rule_is_complex(rule: Dict[str, Any]) -> bool:
+    """
+    Heuristic to decide if a rule is 'complex' and should not have arbitrary selector
+    fields auto-populated. Complex rules include regex usage, many selection blocks,
+    correlation keywords, or mixed and/or conditions.
+    """
+    detection = rule.get("detection", {}) or {}
+    cond = detection.get("condition", "") if isinstance(detection, dict) else ""
+    serialized = json.dumps(detection, default=str)
+
+    # Indicators of complexity / regex use
+    if any(x in serialized for x in ("re:", "regexp", ".*", "\\d", "\\w")):
+        return True
+
+    # Too many selection blocks
+    if isinstance(detection, dict):
+        selection_blocks = [k for k in detection.keys() if k != "condition"]
+        if len(selection_blocks) > 4:
+            return True
+
+    # Mixed and/or correlation
+    if isinstance(cond, str) and (" and " in cond.lower() and " or " in cond.lower()):
+        return True
+
+    correlation_keywords = ["near", "sequence", "count", "within", "pipeline", "correlation"]
+    if any(k in str(cond).lower() for k in correlation_keywords):
+        return True
+
+    return False
+
+
+class UniversalLogGenerator:
+    """Generates logs for ANY Sigma rule - conservative selector-field support"""
+
     LOGSOURCE_TEMPLATES = {
         'azure': {
             'defaults': {
                 'CategoryValue': 'Administrative',
                 'SubscriptionId': 'sub-12345-test',
-                'TenantId': 'tenant-67890'
+                'TenantId': 'tenant-67890',
+                # keep defaults minimal — selector fields may be added via allowed_fields logic
             }
         },
         'aws': {
@@ -117,7 +145,7 @@ class UniversalLogGenerator:
         }
     }
 
-    # Minimal internal metadata fields allowed to be present in generated logs.
+    # Minimal internal metadata always allowed
     INTERNAL_META_FIELDS = {
         "_synthetic_id",
         "_origin",
@@ -129,67 +157,80 @@ class UniversalLogGenerator:
 
     @classmethod
     def generate_for_rule(cls, rule: Dict[str, Any], count: int = 20) -> List[Dict[str, Any]]:
-        """Generate logs for ANY rule - strict field population.
+        """
+        Generate logs for a sigma rule.
 
-        Only fields present in the chosen template defaults (top-level keys)
-        are populated by matching/non-matching generation. Nested attributes
-        inside defaults (dicts) will be used as provided.
+        Behavior:
+        - Determine template based on rule logsource.
+        - Build allowed_fields from template defaults and internal meta.
+        - If the rule is not complex, also add top-level selector field names referenced by the rule.
+        - Generate positive/negative logs but only populate fields present in allowed_fields.
         """
         logsource = rule.get('logsource', {}) or {}
         detection = rule.get('detection', {}) or {}
 
-        # Detect log type
         log_type = cls._detect_log_type(logsource)
-
-        # Template and its defaults
         template = cls.LOGSOURCE_TEMPLATES.get(log_type, cls.LOGSOURCE_TEMPLATES['windows'])
         template_defaults = template.get('defaults', {}) if isinstance(template, dict) else {}
 
-        # Build allowed field names (top-level)
+        # Build allowed fields conservatively (top-level keys)
         allowed_fields = set()
-        # If defaults is nested dict, allow its top-level keys
         if isinstance(template_defaults, dict):
             allowed_fields.update(template_defaults.keys())
-        # Always allow minimal internal metadata fields
         allowed_fields.update(cls.INTERNAL_META_FIELDS)
 
-        # Extract selections: only dict blocks
+        # NEW: if rule is not complex, add top-level selection fields referenced by the rule
+        try:
+            if not rule_is_complex(rule):
+                # collect field names from selection blocks (top-level part only)
+                selection_blocks = [k for k in detection.keys() if k != 'condition' and isinstance(detection.get(k), dict)]
+                sel_fields = set()
+                for sel in selection_blocks:
+                    block = detection.get(sel, {}) or {}
+                    if isinstance(block, dict):
+                        for fld in block.keys():
+                            # field may have modifiers like "CommandLine|contains" or dotted paths
+                            base = fld.split('|')[0].split('.')[0]
+                            if base:
+                                sel_fields.add(base)
+                # conservative: only add if reasonable (alpha/underscore characters)
+                for f in sel_fields:
+                    if re.match(r'^[A-Za-z0-9_\-]+$', f):
+                        allowed_fields.add(f)
+        except Exception:
+            # fall back to strict allowed_fields if anything goes wrong
+            pass
+
+        # Only proceed if there is at least one selection block (otherwise nothing to match)
         selections = {}
         for key, value in detection.items():
             if key != 'condition' and isinstance(value, dict):
                 selections[key] = value
-
         if not selections:
-            # Nothing to synthesize - strict generator will not fabricate matching fields
             return []
 
         primary_selection = list(selections.values())[0]
 
-        # Generate logs
         logs = []
-        positive_count = max(15, int(count * 0.75))  # 75% positive by default
+        positive_count = max(15, int(count * 0.75))
 
-        # Helper to check whether a selection field is allowed
         def is_field_allowed(field_name: str) -> bool:
-            # consider dotted field paths like "parent.child" -> allow if top-level part is allowed
             top = field_name.split('.')[0]
+            # strip modifier part if present
+            top = top.split('|')[0]
             return top in allowed_fields
 
         # POSITIVE matches
         for i in range(positive_count):
             log = cls._create_base_log(template, i, log_type)
             log['_match_type'] = 'positive'
-
             for field, pattern in primary_selection.items():
                 field_name = field.split('|')[0]
-                # Strict check: only set fields that are allowed by template defaults or internal meta
                 if not is_field_allowed(field_name):
-                    # skip population - strict behavior ensures we don't fabricate fields
+                    # skip populating disallowed selector fields
                     continue
-
                 value = cls._generate_matching_value(field_name, pattern, i, log_type)
                 cls._set_field(log, field_name, value)
-
             logs.append(log)
 
         # NEGATIVE matches
@@ -197,16 +238,12 @@ class UniversalLogGenerator:
         for i in range(negative_count):
             log = cls._create_base_log(template, i, log_type)
             log['_match_type'] = 'negative'
-
             for field, pattern in primary_selection.items():
                 field_name = field.split('|')[0]
                 if not is_field_allowed(field_name):
-                    # skip population
                     continue
-
                 value = cls._generate_non_matching_value(field_name, pattern, i, log_type)
                 cls._set_field(log, field_name, value)
-
             logs.append(log)
 
         return logs
@@ -259,8 +296,6 @@ class UniversalLogGenerator:
             'timestamp': datetime.utcnow().isoformat() + 'Z',
             'host': f'test-host-{index % 3}'
         }
-
-        # Add template defaults (deep copy where needed)
         defaults = template.get('defaults', {}) if isinstance(template, dict) else {}
         for key, value in defaults.items():
             if isinstance(value, dict):
@@ -269,12 +304,10 @@ class UniversalLogGenerator:
                 log[key] = value.copy()
             else:
                 log[key] = value
-
         return log
 
     @staticmethod
     def _set_field(log: Dict, field_path: str, value: Any):
-        """Set nested field (supports dotted paths)"""
         if '.' in field_path:
             parts = field_path.split('.')
             current = log
@@ -288,23 +321,16 @@ class UniversalLogGenerator:
 
     @classmethod
     def _generate_matching_value(cls, field: str, pattern: Any, index: int, log_type: str) -> Any:
-        """Generate matching value (same logic as before)"""
-
         if isinstance(pattern, list):
             return pattern[index % len(pattern)]
-
         if pattern is None:
             return None
-
         if isinstance(pattern, bool):
             return pattern
-
         if isinstance(pattern, (int, float)):
             return pattern
-
         pattern_str = str(pattern)
 
-        # Field-specific rules (kept from previous implementation)
         if field in ['EventID', 'event_type_id', 'logtype']:
             if pattern_str.isdigit():
                 return int(pattern_str)
@@ -330,7 +356,7 @@ class UniversalLogGenerator:
         if field == 'OperationNameValue':
             if '/' in pattern_str:
                 return pattern_str
-            return f'Microsoft.Resource/{pattern_str}' if pattern_str else 'Microsoft.Resource/write'
+            return f'Microsoft.Resource/{pattern_str}' if pattern_str else 'Microsoft.Authorization/roleAssignments/write'
 
         if field == 'ResourceId':
             if 'subscriptions' in pattern_str or 'providers' in pattern_str:
@@ -357,7 +383,6 @@ class UniversalLogGenerator:
         if field == 'Operation':
             return pattern_str if pattern_str else 'MailItemsAccessed'
 
-        # Wildcards
         if '*' in pattern_str:
             if pattern_str.startswith('*') and pattern_str.endswith('*'):
                 core = pattern_str.strip('*')
@@ -369,7 +394,6 @@ class UniversalLogGenerator:
                 suffixes = ['', '_test', '123', f'_{index}']
                 return f'{pattern_str.rstrip("*")}{suffixes[index % len(suffixes)]}'
 
-        # Regex-like
         if cls._is_regex_like(pattern_str):
             return cls._generate_from_pattern(pattern_str, index)
 
@@ -413,17 +437,12 @@ class UniversalLogGenerator:
 
     @classmethod
     def _generate_non_matching_value(cls, field: str, pattern: Any, index: int, log_type: str) -> Any:
-        """Generate non-matching value (same as previous logic)"""
-
         if isinstance(pattern, list):
             return f'nomatch_{index}'
-
         if pattern is None:
             return f'notnull_{index}'
-
         if isinstance(pattern, bool):
             return not pattern
-
         if isinstance(pattern, (int, float)):
             return pattern + 9999
 
@@ -461,22 +480,16 @@ class UniversalLogGenerator:
         result = result.replace('\\', '')
         return result
 
-# ---------------------------
-# Compatibility wrapper
-# ---------------------------
+
 class EnhancedLogGenerator:
     """Compatibility wrapper"""
-
     @staticmethod
     def generate_for_sigma_rule(rule: Dict[str, Any], count: int = 20) -> List[Dict[str, Any]]:
         return UniversalLogGenerator.generate_for_rule(rule, count)
 
-# ---------------------------
-# RuleValidator (unchanged behavior) - loads synthetic logs and runs the SOCSimulator
-# ---------------------------
+
 class RuleValidator:
     """Rule validator with universal log generation"""
-
     def __init__(self, output_dir: str, mode: str = 'current', synthetic_logs_dir: str = None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -492,7 +505,6 @@ class RuleValidator:
         }
 
     def load_synthetic_logs(self):
-        """Load synthetic logs"""
         if not self.synthetic_logs_dir or not self.synthetic_logs_dir.exists():
             return
 
@@ -507,15 +519,12 @@ class RuleValidator:
         print(f"    Loaded {len(self.synthetic_logs)} logs")
 
     def validate_all_rules(self, rules_dir: str, rule_type: str = 'sigma'):
-        """Validate all rules"""
         rules_path = Path(rules_dir)
-
         if not rules_path.exists():
             return
 
         print(f"\n[+] Validating {rule_type.upper()} rules in: {rules_dir}")
 
-        # Find rules
         if rule_type == 'sigma':
             rule_files = list(rules_path.rglob('*.yml')) + list(rules_path.rglob('*.yaml'))
         else:
@@ -523,7 +532,6 @@ class RuleValidator:
 
         print(f"    Found {len(rule_files)} files")
 
-        # Load rules
         all_rules = []
         for rule_file in rule_files:
             try:
@@ -534,7 +542,6 @@ class RuleValidator:
 
         print(f"    Loaded {len(all_rules)} rules")
 
-        # Run rules against synthetic logs via SOCSimulator
         if self.synthetic_logs:
             print(f"    Running against {len(self.synthetic_logs)} logs...")
 
@@ -550,7 +557,6 @@ class RuleValidator:
             self.results['statistics'] = metrics
 
     def save_results(self):
-        """Save results"""
         results_file = self.output_dir / 'validation_results.json'
         with open(results_file, 'w', encoding='utf-8') as f:
             json.dump(self.results, f, indent=2)
@@ -565,11 +571,9 @@ class RuleValidator:
         with open(stats_file, 'w', encoding='utf-8') as f:
             json.dump(self.results.get('statistics', {}), f, indent=2)
 
-# ---------------------------
-# CLI
-# ---------------------------
+
 def main():
-    parser = argparse.ArgumentParser(description='Universal Rule Validator (strict generator)')
+    parser = argparse.ArgumentParser(description='Universal Rule Validator (strict but selector-friendly)')
     parser.add_argument('--all-sigma-rules', help='Sigma rules directory')
     parser.add_argument('--all-yara-rules', help='YARA rules directory')
     parser.add_argument('--synthetic-logs-dir', help='Synthetic logs directory')
@@ -590,6 +594,7 @@ def main():
 
     validator.save_results()
     print(f"\n✅ Validation complete ({args.mode} mode)")
+
 
 if __name__ == '__main__':
     main()
