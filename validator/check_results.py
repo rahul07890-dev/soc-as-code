@@ -2,16 +2,6 @@
 """
 Check validation results with classification support
 Supports both old validation format and new comparison-based classification
-
-Behavior:
-- average_score in the report may be 0..1 or 0..100. We display the original average as a percentage
-  (e.g. "13.00 (13/100)").
-- If average < 25 → transformed_avg = average * 4, otherwise transformed_avg = average.
-  The FINAL NORMALIZED SCORE and overall risk use transformed_avg.
-- Each rule's numeric score is similarly transformed before deriving its classification.
-- Grade distribution is computed from the transformed per-rule classifications so that
-  classification counts match displayed classifications.
-- No icons are printed next to individual rules; icons remain for the grade-distribution lines.
 """
 import sys
 import json
@@ -129,7 +119,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
 
     # Print the displayed average (original percent)
     print(f"\nTotal new rules analyzed: {total_rules}")
-    print(f"Average quality score: ({avg_pct:.0f}*4)/100")
+    print(f"Average quality score:" ({avg_pct:.0f}*4))
 
     # Process each rule: normalize, transform, classify. Build processed rules list and grade counts.
     processed_rules: List[Dict[str, Any]] = []
@@ -316,4 +306,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
