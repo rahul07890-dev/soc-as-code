@@ -256,7 +256,7 @@ def main():
     args = parser.parse_args()
 
     # allow overriding thresholds from CLI
-    global STRONG_DELTA, MIN_RULE_CONTRIBUTION, NEUTRAL_UPPER
+    global STRONG_DELTA, MIN_RULE_CONTRIBUTION
     STRONG_DELTA = int(args.strong_delta)
     MIN_RULE_CONTRIBUTION = int(args.min_rule_contrib)
     NEUTRAL_UPPER = STRONG_DELTA - 1
@@ -309,3 +309,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
