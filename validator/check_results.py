@@ -129,7 +129,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
 
     # Print the displayed average (original percent)
     print(f"\nTotal new rules analyzed: {total_rules}")
-    print(f"Average quality score: {avg_pct:.2f} ({avg_pct:.0f}/100)")
+    print(f"Average quality score: ({avg_pct:.0f}*4)/100")
 
     # Process each rule: normalize, transform, classify. Build processed rules list and grade counts.
     processed_rules: List[Dict[str, Any]] = []
@@ -212,7 +212,6 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     # No emoji/icon here as requested
     print("\nFINAL NORMALIZED SCORE")
     print(f"   Score: {final_score:.2f}")
-    print(f"   Risk Level: {risk_level}")
     print("\n" + "=" * 70)
 
     # Recompute aggregated BAD/CONCERNING counts from grade_counts for pass/fail logic
@@ -317,3 +316,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
