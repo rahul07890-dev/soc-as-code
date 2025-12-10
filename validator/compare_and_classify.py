@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-compare_and_classify.py (improved)
+compare_and_classify.py (final)
 
-- Reads baseline/current detection outputs (detections.json)
-- Reads synthetic_logs/combined/all_logs.jsonl to map synthetic log IDs -> origin/source_rule
-- For each changed rule (YAML path list), computes:
-    TP = detections on synthetic logs that were generated FOR that rule (origin=new)
-    FP = detections on synthetic logs NOT generated for that rule (origin=baseline OR other new)
-    FN = synthetic logs generated for that rule (origin=new) that produced NO detection
-- Calculates Precision / Recall / F1 and a composite score that includes structure/complexity penalty.
-- Applies transformation rule:
-      if composite < 25 -> transformed = composite * 4 (clamped to 100)
-      else -> transformed = composite
-- Adds detection_count and triggered fields so downstream reporting shows correct detection info.
-- Produces classification JSON report (compatible with your workflow)
+Behavior:
+- Reads baseline/current detections (detections.json)
+- Reads synthetic_logs/combined/all_logs.jsonl
+- For each changed rule, computes TP/FP/FN, precision/recall/f1, structure score, noise ratio
+- Composite (raw_score) computed as:
+    composite = 0.5*(f1*100) + 0.3*(1-noise_ratio)*100 + 0.2*(structure_score)
+- Classification (grade EXCELLENT/GOOD/NEUTRAL/CONCERNING/BAD) is derived from RAW composite
+- For display only, `score` = transform_score(raw_score) where transform_score: if raw < 25 -> raw*4 else raw (clamped 0..100)
+- Output JSON contains both raw_score and score (transformed), detection_count, triggered, reasoning, timestamp
+- summary.average_score is average of transformed scores (keeps previous UX)
 """
+
 import argparse
 import json
 import yaml
@@ -22,6 +21,7 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Dict, Any, List
 from datetime import datetime
+import math
 
 # ---------- helpers ----------
 def load_json(path: Path):
@@ -94,7 +94,7 @@ def structure_score_for_rule(rule_path: Path) -> int:
     return int(clamp(score, 0, 100))
 
 def transform_score(score: float) -> float:
-    """Apply transformation rule: if score < 25 -> score*4 else score. Clamp to 100."""
+    """If score < 25 -> multiply by 4; else unchanged. Clamp 0..100."""
     try:
         s = float(score)
     except Exception:
@@ -103,7 +103,19 @@ def transform_score(score: float) -> float:
         s = s * 4.0
     return float(clamp(round(s, 2), 0, 100))
 
-# ---------- main classifier ----------
+def classify_grade_from_composite(score_pct: float) -> str:
+    """Map composite raw_score (0-100) to grade."""
+    if score_pct >= 80:
+        return "EXCELLENT"
+    if score_pct >= 65:
+        return "GOOD"
+    if score_pct >= 45:
+        return "NEUTRAL"
+    if score_pct >= 30:
+        return "CONCERNING"
+    return "BAD"
+
+# ---------- Classifier ----------
 class Classifier:
     def __init__(self, baseline_dir: Path, current_dir: Path, synthetic_combined_file: Path):
         self.baseline_dets = load_json(baseline_dir / "detections.json") if baseline_dir else []
@@ -140,11 +152,9 @@ class Classifier:
 
         generated_count = len(logs_for_rule)
 
-        # Detections that map to synthetic logs: gather SIDs that matched at least once
+        # Detections mapping and attribution
         matched_sids = set()
         detected_source_rule_ids = defaultdict(int)
-
-        # Also collect detection objects that we can confidently associate with this rule
         detections_for_rule = []
 
         for det in self.current_dets:
@@ -157,8 +167,8 @@ class Classifier:
                 if src_rid:
                     detected_source_rule_ids[str(src_rid)] += 1
             else:
-                # attempt naive extraction from stringified raw
                 try:
+                    # naive string parsing
                     if isinstance(raw, str) and "_synthetic_id" in raw:
                         import re
                         m = re.search(r'"_synthetic_id"\s*:\s*"([^"]+)"', raw)
@@ -182,13 +192,12 @@ class Classifier:
                 # conservative: do not attribute ambiguous detections
                 pass
 
-        # True Positives: matched sids that belong to this rule (source_rule_id == rid/name/title)
+        # True Positives and False Positives (based on synthetic map)
         tp_sids = set()
         fp_sids = set()
         for sid in matched_sids:
             log = self.synthetic_map.get(sid)
             if not log:
-                # no synthetic log present for that SID - treat as ambiguous (count toward FP)
                 fp_sids.add(sid)
                 continue
             if log.get("_origin") == "new":
@@ -214,17 +223,14 @@ class Classifier:
         # Noise penalty: fraction of detections that were FP among all matched_sids
         noise_ratio = (FP / (TP + FP)) if (TP + FP) > 0 else 0.0
 
-        # Composite scoring:
-        #  - 50% weight to detection quality (F1)
-        #  - 30% weight to noise-resistance (1 - noise_ratio)
-        #  - 20% weight to structural score normalized
-        composite = (f1 * 100) * 0.5 + (1 - noise_ratio) * 100 * 0.3 + (struct_score) * 0.2
+        # Composite scoring (raw composite)
+        composite = (f1 * 100.0) * 0.5 + (1 - noise_ratio) * 100.0 * 0.3 + (struct_score) * 0.2
         composite = clamp(round(composite, 2), 0, 100)
 
-        # Apply transformation rule to composite to produce the reported score
+        # Transform for display only
         transformed_score = transform_score(composite)
 
-        # Build detection_count and triggered
+        # detection_count and triggered
         detection_count = len(detections_for_rule)
         triggered_flag = detection_count > 0 or (TP + FP) > 0
 
@@ -240,13 +246,8 @@ class Classifier:
         if noise_ratio > 0.1:
             reasoning.append("High false-positive rate against baseline/other synthetic logs -> rule likely noisy.")
 
-        # classification thresholds (tunable)
-        if transformed_score >= 70 and precision >= 0.8 and recall >= 0.5:
-            grade = "STRONG"
-        elif transformed_score >= 45:
-            grade = "NEUTRAL"
-        else:
-            grade = "WEAK"
+        # Classification grade derived from RAW composite
+        grade = classify_grade_from_composite(composite)
 
         result = {
             "rule_name": name,
@@ -262,14 +263,21 @@ class Classifier:
             "f1": round(f1, 3),
             "structure_score": struct_score,
             "noise_ratio": round(noise_ratio, 3),
+            # keep both raw composite (for classification) and transformed display score
             "raw_score": composite,
             "score": transformed_score,
-            "classification": grade,
+            "classification": grade,     # grade based on composite
             "reasoning": " | ".join(reasoning),
             "timestamp": datetime.utcnow().isoformat() + "Z",
             # new fields:
             "detection_count": detection_count,
             "triggered": triggered_flag,
+            # keep metrics for consumers
+            "metrics": {
+                "true_positive_delta": TP,
+                "false_positive_delta": FP,
+                "precision_delta": round(precision, 3)
+            }
         }
 
         return result
@@ -311,15 +319,19 @@ def main():
             res = cls.classify_rule(Path(rp))
             results.append(res)
 
-        avg = sum(r["score"] for r in results) / len(results) if results else 0
+        # average of transformed (display) scores kept for UX/backwards compatibility
+        avg_transformed = sum(r["score"] for r in results) / len(results) if results else 0.0
+
+        # by_grade derived from RAW composite classifications (so grades reflect detection quality)
         by_grade = {}
         for r in results:
-            by_grade[r["classification"]] = by_grade.get(r["classification"], 0) + 1
+            g = r.get("classification", "UNKNOWN")
+            by_grade[g] = by_grade.get(g, 0) + 1
 
         report = {
             "summary": {
                 "total_rules": len(results),
-                "average_score": round(avg, 2),
+                "average_score": round(avg_transformed, 2),
                 "by_grade": by_grade
             },
             "rules": results
