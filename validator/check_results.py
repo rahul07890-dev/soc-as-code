@@ -1,122 +1,74 @@
 #!/usr/bin/env python3
 """
-check_results.py
+Check validation results with classification support
+Supports both old validation format and new comparison-based classification
 
-Compatibility wrapper for CI:
-- Accepts --results-dir and --classification-report
-- Accepts --fail-on-bad-rules true/false
-- Prints human-friendly summary using raw_score for classification and display (transformed) score for UX
-- Triggered = True only when TP > 0
+Behavior:
+- Accepts classification reports where scores may be 0..1 or 0..100.
+- Displays the raw average (percent) in the summary (e.g. "13.00 (13/100)").
+- Applies transform: if value < 25 -> value * 4, else leave as-is (clamped to 100).
+  - Final normalized score and rule classifications are based on the transformed values.
+- Keeps icons for the grade distribution only. No icons printed next to individual rules.
 """
+import os
 import sys
 import json
 import argparse
 from pathlib import Path
+from typing import Any
 
-def parse_bool(s: str) -> bool:
-    if isinstance(s, bool):
-        return s
-    if s is None:
-        return False
-    return str(s).lower() in ("1", "true", "yes", "y", "t")
 
-def get_risk_level(score_display: float) -> str:
-    """Risk tiers based on display/normalized score (0-100)"""
+def clamp(n, a=0, b=100):
+    return max(a, min(b, n))
+
+
+def normalize_to_percent(value: Any) -> float:
+    """Normalize a score that may be in 0..1 or 0..100 ranges to a 0..100 float."""
     try:
-        s = float(score_display)
+        v = float(value)
+    except Exception:
+        return 0.0
+    if v <= 1.0:
+        return v * 100.0
+    return v
+
+
+def transform_score(score_pct: float) -> float:
+    """If score < 25 -> multiply by 4, else leave. Clamp to 100."""
+    try:
+        s = float(score_pct)
     except Exception:
         s = 0.0
-    if s >= 80:
+    if s < 25.0:
+        s = s * 4.0
+    return clamp(round(s, 2), 0, 100)
+
+
+def get_risk_level(score: float) -> str:
+    """Return risk level based on normalized score (0-100)."""
+    if score >= 80:
         return "LOW RISK"
-    if s >= 60:
+    elif score >= 60:
         return "MODERATE RISK"
-    if s >= 40:
+    elif score >= 40:
         return "HIGH RISK"
-    return "CRITICAL RISK"
-
-def load_report(report_path: Path):
-    if not report_path.exists():
-        raise FileNotFoundError(f"Classification report not found: {report_path}")
-    try:
-        return json.loads(report_path.read_text(encoding='utf-8'))
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse classification report {report_path}: {e}")
-
-def print_summary(report: dict):
-    summary = report.get('summary', {})
-    rules = report.get('rules', [])
-
-    total_rules = int(summary.get('total_rules', 0))
-    avg_display = float(summary.get('average_score', 0.0))
-
-    print("\n" + "="*70)
-    print("VALIDATION & CLASSIFICATION RESULTS")
-    print("="*70)
-    print("\nCLASSIFICATION SUMMARY")
-    print("-"*70)
-    print(f"Total new rules analyzed: {total_rules}")
-    print(f"Average quality score (display): {avg_display:.2f} / 100")
-    # additionally print raw average if we can compute it
-    raw_scores = []
-    for r in rules:
-        if isinstance(r.get('raw_score'), (int, float)):
-            raw_scores.append(float(r.get('raw_score')))
-    if raw_scores:
-        avg_raw = sum(raw_scores) / len(raw_scores)
-        print(f"Average raw composite score: {avg_raw:.2f} / 100")
-    print("")
-    if summary.get('by_grade'):
-        print("Grade Distribution:")
-        # ensure consistent order
-        grade_order = ['EXCELLENT','GOOD','NEUTRAL','CONCERNING','BAD']
-        for g in grade_order:
-            if g in summary['by_grade']:
-                cnt = summary['by_grade'][g]
-                icon = get_grade_icon(g)
-                print(f"  {icon} {g:12} : {cnt} rule(s)")
     else:
-        print("No grade distribution available")
+        return "CRITICAL RISK"
 
-    # Detailed
-    if rules:
-        print("\n" + "-"*70)
-        print("DETAILED RULE CLASSIFICATIONS")
-        print("-"*70)
-        # sort by raw_score then display score
-        def sort_key(r):
-            return (r.get('raw_score', 0), r.get('score', 0))
-        for rule in sorted(rules, key=sort_key, reverse=True):
-            rn = rule.get('rule_name', 'Unknown')
-            raw = rule.get('raw_score', None)
-            disp = rule.get('score', None)
-            cls = rule.get('classification', 'UNKNOWN')
-            tp = rule.get('TP', 0)
-            fp = rule.get('FP', 0)
-            fn = rule.get('FN', 0)
-            triggered = bool(rule.get('triggered', False))
-            total_dets = rule.get('total_detections', 0)
-            reasoning = rule.get('reasoning', 'No reasoning provided')
 
-            # Print header line
-            print(f"\n{rn}")
-            if raw is not None:
-                print(f"   Classification (raw): {cls} | Raw: {raw:.2f}/100 | Display: {disp:.2f}/100")
-            else:
-                print(f"   Classification: {cls} | Display: {disp:.2f}/100")
+def get_classification_from_score(score_percent: float) -> str:
+    """Map a numeric score percentage (0-100) to a classification grade."""
+    if score_percent >= 80:
+        return "EXCELLENT"
+    elif score_percent >= 65:
+        return "GOOD"
+    elif score_percent >= 45:
+        return "NEUTRAL"
+    elif score_percent >= 30:
+        return "CONCERNING"
+    else:
+        return "BAD"
 
-            # Trigger/detection lines
-            print(f"   Triggered (TP>0): {'Yes' if triggered else 'No'} | TP: {tp} | Total detections: {total_dets}")
-            # Impact/metrics
-            print(f"   Impact: TP={tp} | FP={fp} | FN={fn}")
-            print(f"   Reasoning: {reasoning}")
-
-    # Final normalized/display score & risk
-    print("\n" + "="*70)
-    print("FINAL NORMALIZED SCORE")
-    print("-"*70)
-    print(f"   Score (display avg): {avg_display:.2f}")
-    print(f"   Risk Level: {get_risk_level(avg_display)}")
-    print("="*70 + "\n")
 
 def get_grade_icon(grade: str) -> str:
     icons = {
@@ -126,53 +78,254 @@ def get_grade_icon(grade: str) -> str:
         'CONCERNING': '⚠️',
         'BAD': '❌'
     }
-    return icons.get(grade, '❓')
+    return icons.get(grade, '')
 
-def main():
-    parser = argparse.ArgumentParser(description="Check validation results and classification report (CI-friendly)")
-    parser.add_argument('--results-dir', default='validation_results',
-                        help='Directory containing validation artifacts (default: validation_results)')
-    parser.add_argument('--classification-report', default=None,
-                        help='Path to classification report JSON file (if omitted, script looks for <results-dir>/classification_report.json)')
-    parser.add_argument('--fail-on-bad-rules', default='false',
-                        help='Fail run (exit non-zero) if bad/concerning rules found. Accepts true/false')
-    args = parser.parse_args()
 
-    results_dir = Path(args.results_dir)
-    report_path = Path(args.classification_report) if args.classification_report else results_dir / 'classification_report.json'
-    fail_on_bad = parse_bool(args.fail_on_bad_rules)
+def check_results(results_dir: str, classification_report: str = None,
+                  fail_on_bad_rules: bool = False):
+    """Check validation results and classification report"""
 
-    try:
-        report = load_report(report_path)
-    except Exception as e:
-        print(f"ERROR: Could not load classification report: {e}")
-        sys.exit(2)
+    results_path = Path(results_dir)
+    has_classification = bool(classification_report and Path(classification_report).exists())
 
-    # Print summary
-    print_summary(report)
+    print("\n" + "=" * 70)
+    print("VALIDATION & CLASSIFICATION RESULTS")
+    print("=" * 70)
 
-    # Decide pass/fail
-    by_grade = report.get('summary', {}).get('by_grade', {})
-    bad = int(by_grade.get('BAD', 0))
-    concerning = int(by_grade.get('CONCERNING', 0))
+    if has_classification:
+        print("\nCLASSIFICATION REPORT FOUND - Using comparison-based validation")
+        check_classification_report(classification_report, fail_on_bad_rules)
 
-    if fail_on_bad:
-        if bad > 0:
-            print(f"VALIDATION FAILED — {bad} BAD rule(s) found (fail-on-bad-rules enabled)")
-            sys.exit(1)
-        if concerning > 0:
-            print(f"VALIDATION PASSED WITH WARNINGS — {concerning} concerning rule(s) found (fail-on-bad-rules enabled)")
-            sys.exit(0)
-        print("VALIDATION PASSED — All rules meet quality standard")
-        sys.exit(0)
+    # Traditional results (optional)
+    results_file = results_path / 'validation_results.json'
+    if results_file.exists():
+        print("\nTRADITIONAL VALIDATION RESULTS")
+        check_traditional_results(results_file)
     else:
-        if bad > 0 or concerning > 0:
-            print("QUALITY CONCERNS DETECTED")
-            print(f"  BAD: {bad} | CONCERNING: {concerning}")
+        print("\nNo traditional validation results found")
+
+    print("\n" + "=" * 70)
+
+
+def check_classification_report(report_file: str, fail_on_bad_rules: bool):
+    """Check classification report and determine pass/fail"""
+
+    with open(report_file, 'r', encoding='utf-8') as f:
+        report = json.load(f)
+
+    summary = report.get('summary', {})
+    rules = report.get('rules', [])
+
+    print("\n" + "-" * 70)
+    print("CLASSIFICATION SUMMARY")
+    print("-" * 70)
+
+    total_rules = int(summary.get('total_rules', 0))
+    raw_avg = summary.get('average_score', 0)
+
+    # Normalize raw average to percent for display
+    avg_pct = normalize_to_percent(raw_avg)
+
+    # Compute transformed average (for final/classification use)
+    final_avg = transform_score(avg_pct)
+
+    # Attempt to use provided by_grade if it exists, otherwise compute from transformed rule scores
+    provided_by_grade = summary.get('by_grade', {}) or {}
+
+    # If rules exist, recompute per-rule transformed classifications to ensure consistency
+    computed_by_grade = {'EXCELLENT': 0, 'GOOD': 0, 'NEUTRAL': 0, 'CONCERNING': 0, 'BAD': 0}
+    processed_rules = []
+
+    for rule in rules:
+        rule_name = rule.get('rule_name', rule.get('title', rule.get('rule_path', 'Unknown')))
+        # Prefer 'score' field (already transformed by classifier). If absent, normalize and transform.
+        if 'score' in rule:
+            score_val = normalize_to_percent(rule.get('score', 0))
+            # the report's 'score' may already be transformed; still apply transform to be safe (idempotent)
+            transformed = transform_score(score_val)
+        else:
+            # maybe report contains raw_score or raw composite; try to fall back
+            raw_score = rule.get('raw_score', rule.get('raw', rule.get('composite', 0)))
+            raw_pct = normalize_to_percent(raw_score)
+            transformed = transform_score(raw_pct)
+
+        classification = get_classification_from_score(transformed)
+        triggered = rule.get('triggered', False)
+        detection_count = rule.get('detection_count', 0)
+        reasoning = rule.get('reasoning', 'No reasoning provided')
+        metrics = rule.get('metrics', {})
+
+        computed_by_grade[classification] = computed_by_grade.get(classification, 0) + 1
+
+        processed_rules.append({
+            'rule_name': rule_name,
+            'classification': classification,
+            'score': transformed,
+            'triggered': triggered,
+            'detection_count': detection_count,
+            'reasoning': reasoning,
+            'metrics': metrics
+        })
+
+    # Choose which by_grade to display: prefer computed_by_grade if rules were present, else provided_by_grade
+    by_grade = computed_by_grade if processed_rules else provided_by_grade
+
+    print(f"\nTotal new rules analyzed: {total_rules}")
+    print(f"Average quality score: {avg_pct:.2f} ({avg_pct:.0f}/100)")
+
+    if by_grade:
+        print("\nGrade Distribution:")
+        grade_order = ['EXCELLENT', 'GOOD', 'NEUTRAL', 'CONCERNING', 'BAD']
+        for grade in grade_order:
+            cnt = by_grade.get(grade, 0)
+            if cnt:
+                icon = get_grade_icon(grade)
+                print(f"  {icon} {grade:12} : {cnt} rule(s)")
+
+    # Detailed rule classifications (sorted by transformed score desc)
+    if processed_rules:
+        print("\n" + "-" * 70)
+        print("DETAILED RULE CLASSIFICATIONS")
+        print("-" * 70)
+
+        processed_rules.sort(key=lambda r: r.get('score', 0), reverse=True)
+        for r in processed_rules:
+            print(f"\n{r['rule_name']}")
+            print(f"   Classification: {r['classification']} (Score: {r['score']:.0f}/100)")
+            print(f"   Triggered: {'Yes' if r['triggered'] else 'No'} | Detections: {r['detection_count']}")
+            if r.get('metrics'):
+                tp_delta = r['metrics'].get('true_positive_delta', 0)
+                fp_delta = r['metrics'].get('false_positive_delta', 0)
+                precision_delta = r['metrics'].get('precision_delta', None)
+
+                print("   Impact:")
+                if tp_delta != 0:
+                    print(f"     • True Positives: {tp_delta:+}")
+                if fp_delta != 0:
+                    print(f"     • False Positives: {fp_delta:+}")
+                if precision_delta is not None:
+                    try:
+                        print(f"     • Precision: {precision_delta:+.2%}")
+                    except Exception:
+                        print(f"     • Precision: {precision_delta}")
+            print(f"   Reasoning: {r['reasoning']}")
+
+    # -------------------------------
+    # FINAL SCORE + RISK SECTION
+    # -------------------------------
+    print("\n" + "=" * 70)
+
+    # final_avg is the transformed average used for classification/risk
+    risk_level = get_risk_level(final_avg)
+
+    # Print final normalized score (transformed)
+    print("\nFINAL SCORE")
+    print(f"   Score: {final_avg:.2f}")
+    print(f"   Risk Level: {risk_level}")
+    print("\n" + "=" * 70)
+
+    # Pass/fail logic based on by_grade
+    bad_rules = by_grade.get('BAD', 0)
+    concerning_rules = by_grade.get('CONCERNING', 0)
+
+    if fail_on_bad_rules:
+        if bad_rules > 0:
+            print(f"\nVALIDATION FAILED — {bad_rules} BAD rule(s)")
+            sys.exit(1)
+        elif concerning_rules > 0:
+            print(f"\nVALIDATION PASSED WITH WARNINGS — {concerning_rules} concerning rule(s)")
             sys.exit(0)
         else:
-            print("ALL RULES MEET QUALITY STANDARDS")
+            print(f"\nVALIDATION PASSED — All rules meet quality standard")
             sys.exit(0)
 
-if __name__ == "__main__":
+    else:
+        if bad_rules > 0 or concerning_rules > 0:
+            print(f"\nQUALITY CONCERNS DETECTED")
+            print(f"   BAD: {bad_rules} | CONCERNING: {concerning_rules}")
+        else:
+            print(f"\nALL RULES MEET QUALITY STANDARDS")
+
+        sys.exit(0)
+
+
+def check_traditional_results(results_file: Path):
+    """Check traditional validation results format"""
+
+    with open(results_file, 'r', encoding='utf-8') as f:
+        results = json.load(f)
+
+    print("-" * 70)
+
+    total_passed = results.get('total_passed', 0)
+    total_failed = results.get('total_failed', 0)
+    total_tested = total_passed + total_failed
+    mode = results.get('mode', 'unknown')
+
+    print(f"Mode: {mode.upper()}")
+    print(f"Total rules tested: {total_tested}")
+    print(f"Passed: {total_passed}")
+    print(f"Failed: {total_failed}")
+
+    if total_tested > 0:
+        print(f"Pass rate: {total_passed / total_tested * 100:.1f}%")
+
+    details = results.get('details', [])
+    if details:
+        print("\n" + "-" * 70)
+        print("DETAILED RESULTS")
+        print("-" * 70)
+
+        for detail in details:
+            status_icon = "✅" if detail.get('passed') else "❌"
+            rule_title = detail.get('rule_title', 'Untitled')
+            rule_id = detail.get('rule_id', 'Unknown')
+
+            print(f"\n{status_icon} {rule_title}")
+            print(f"   ID: {rule_id}")
+            print(f"   Path: {detail.get('rule_path', 'N/A')}")
+
+            if 'error' in detail:
+                print(f"   Error: {detail['error']}")
+            else:
+                detection_rate = detail.get('detection_rate', 0)
+                expected = detail.get('expected_matches', 0)
+                actual = detail.get('actual_matches', 0)
+
+                print(f"   Detection Rate: {detection_rate}%")
+                print(f"   Expected Matches: {expected}")
+                print(f"   Actual Matches: {actual}")
+
+    stats_file = results_file.parent / 'statistics.json'
+    if stats_file.exists():
+        with open(stats_file, 'r', encoding='utf-8') as f:
+            stats = json.load(f)
+
+        if stats:
+            print("\n" + "-" * 70)
+            print("DETECTION STATISTICS")
+            print("-" * 70)
+            total_events = stats.get('total_events_processed', 0)
+            total_alerts = stats.get('total_alerts_generated', 0)
+
+            print(f"Events processed: {total_events}")
+            print(f"Alerts generated: {total_alerts}")
+
+            if total_events > 0:
+                print(f"Alert rate: {total_alerts / total_events * 100:.2f}%")
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Check validation results')
+    parser.add_argument('--results-dir', default='validation_results')
+    parser.add_argument('--classification-report')
+    parser.add_argument('--fail-on-bad-rules', type=lambda x: x.lower() == 'true',
+                        default=False)
+    args = parser.parse_args()
+
+    check_results(args.results_dir, args.classification_report, args.fail_on_bad_rules)
+
+
+if __name__ == '__main__':
     main()
+
