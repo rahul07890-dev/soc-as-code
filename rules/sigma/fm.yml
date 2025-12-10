@@ -1,0 +1,16 @@
+title: Weak - Nonexistent Field Match
+id: SIG-WEAK-001
+status: experimental
+description: Matches a field name that synthetic logs will not contain.
+author: CI Validator
+date: 2025-01-01
+logsource:
+  product: windows
+  category: process_creation
+detection:
+  selection:
+    TotallyFakeField: "malicious.exe"
+  condition: selection
+falsepositives:
+  - None expected (rule never matches)
+level: low
