@@ -5,13 +5,13 @@ compare_and_classify.py (improved)
 - Reads baseline/current detection outputs (detections.json)
 - Reads synthetic_logs/combined/all_logs.jsonl to map synthetic log IDs -> origin/source_rule
 - For each changed rule (YAML path list), computes:
-    TP = detections on synthetic logs that were generated FOR that rule (origin=new)
-    FP = detections on synthetic logs NOT generated for that rule (origin=baseline OR other new)
-    FN = synthetic logs generated for that rule (origin=new) that produced NO detection
-- Calculates Precision / Recall / F1 and a composite score that includes structure/complexity penalty.
-- Produces classification JSON report (compatible with your workflow)
+    TP / FP / FN, Precision / Recall / F1, structure score, noise ratio
+- Composite score computed (0-100). THEN apply transformation:
+    if composite < 25 -> transformed = composite * 4 (clamped to 100)
+    else -> transformed = composite
+- Classification (STRONG / NEUTRAL / WEAK) uses transformed score.
+- Writes classification report with transformed per-rule scores and average_score (average of transformed scores).
 """
-
 import argparse
 import json
 import yaml
@@ -25,13 +25,16 @@ import math
 def load_json(path: Path):
     if not path.exists():
         return []
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return []
 
 def load_synthetic_logs(path: Path) -> List[Dict[str,Any]]:
     logs = []
     if not path.exists():
         return logs
-    with open(path, 'r') as fh:
+    with open(path, 'r', encoding='utf-8') as fh:
         for line in fh:
             line=line.strip()
             if not line:
@@ -45,7 +48,7 @@ def load_synthetic_logs(path: Path) -> List[Dict[str,Any]]:
 def extract_rule_identifiers_from_yaml(path: Path) -> Dict[str,str]:
     res = {"id": None, "title": None, "filename": path.stem}
     try:
-        y = yaml.safe_load(path.read_text())
+        y = yaml.safe_load(path.read_text(encoding='utf-8'))
         if isinstance(y, dict):
             res["id"] = str(y.get("id")).strip() if y.get("id") else None
             res["title"] = str(y.get("title")).strip() if y.get("title") else None
@@ -57,9 +60,8 @@ def clamp(n, a=0, b=100):
     return max(a, min(b, n))
 
 def structure_score_for_rule(rule_path: Path) -> int:
-    # Heuristics: penalize regex/heavy ORs and reward ANDs and multi-field use
     try:
-        y = yaml.safe_load(rule_path.read_text())
+        y = yaml.safe_load(rule_path.read_text(encoding='utf-8'))
     except Exception:
         return 0
     detection = y.get("detection", {}) if isinstance(y, dict) else {}
@@ -76,7 +78,6 @@ def structure_score_for_rule(rule_path: Path) -> int:
         score -= 15
     if " and " in str(cond).lower():
         score += 10
-    # more fields used -> better
     field_count = 0
     for sel in selections:
         block = detection.get(sel, {})
@@ -84,6 +85,16 @@ def structure_score_for_rule(rule_path: Path) -> int:
             field_count += len(block.keys())
     score += min(20, field_count * 3)
     return clamp(score, 0, 100)
+
+def transform_score(score: float) -> float:
+    """Apply transformation rule: if score < 25 -> score*4 else score. Clamp to 100."""
+    try:
+        s = float(score)
+    except Exception:
+        s = 0.0
+    if s < 25.0:
+        s = s * 4.0
+    return clamp(round(s, 2), 0, 100)
 
 # ---------- main classifier ----------
 class Classifier:
@@ -97,17 +108,14 @@ class Classifier:
             sid = l.get("_synthetic_id")
             if sid:
                 self.synthetic_map[sid] = l
-        # pre-index detections by synthetic id if present
-        # Many detectors include 'raw' that contains the original synthetic log (depending on your SOCSimulator).
+        # index current detections by synthetic id where possible
         self.indexed_current = defaultdict(list)
         for det in self.current_dets:
-            # detection may hold raw with _synthetic_id or _source_rule_id
             raw = det.get("raw") or det.get("log") or det.get("_raw") or det.get("original_event") or {}
             sid = None
             if isinstance(raw, dict):
                 sid = raw.get("_synthetic_id") or raw.get("_syntheticId") or raw.get("_syntheticID")
             if not sid:
-                # sometimes the synthetic_id got placed at top-level
                 sid = det.get("_synthetic_id") or det.get("synthetic_id")
             if sid:
                 self.indexed_current[sid].append(det)
@@ -120,19 +128,16 @@ class Classifier:
 
         # Gather synthetic logs generated "for" this rule (origin=new)
         logs_for_rule = [l for l in self.synthetic_logs if l.get("_origin") == "new" and l.get("_source_rule_id") in {rid, name, title}]
-        # fallback: match by filename if id/title missing
         if not logs_for_rule:
             logs_for_rule = [l for l in self.synthetic_logs if l.get("_origin") == "new" and l.get("_source_rule_id") in {name, title}]
 
         generated_count = len(logs_for_rule)
 
-        # Detections that map to synthetic logs: gather SIDs that matched at least once
+        # Detections mapping to synthetic logs
         matched_sids = set()
-        # also collect detections that reference source_rule_id in raw (older flow)
         detected_source_rule_ids = defaultdict(int)
 
         for det in self.current_dets:
-            # attempt to find synthetic id in detection.raw
             raw = det.get("raw") or det.get("log") or det.get("_raw") or det.get("original_event") or {}
             sid = None
             if isinstance(raw, dict):
@@ -141,62 +146,48 @@ class Classifier:
                 if src_rid:
                     detected_source_rule_ids[str(src_rid)] += 1
             else:
-                # sometimes raw is dumped as string; try naive substring
                 try:
                     if isinstance(raw, str) and "_synthetic_id" in raw:
-                        # naive parse - not perfect, but helpful
-                        # find pattern like "_synthetic_id\": \"<uuid>\""
                         import re
                         m = re.search(r'"_synthetic_id"\s*:\s*"([^"]+)"', raw)
                         if m:
                             sid = m.group(1)
                 except Exception:
                     pass
-
             if sid:
                 matched_sids.add(sid)
 
-        # True Positives: matched sids that belong to this rule (source_rule_id == rid)
         tp_sids = set()
         fp_sids = set()
         for sid in matched_sids:
             log = self.synthetic_map.get(sid)
             if not log:
-                # no synthetic log present for that SID - treat as ambiguous (count toward FP)
                 fp_sids.add(sid)
                 continue
-            # if synthetic log origin is "new"
             if log.get("_origin") == "new":
                 if log.get("_source_rule_id") in {rid, name, title}:
                     tp_sids.add(sid)
                 else:
-                    # matched a different new rule's synthetic log -> FP for this rule
                     fp_sids.add(sid)
             else:
-                # matched a baseline synthetic log -> FP
                 fp_sids.add(sid)
 
         TP = len(tp_sids)
         FP = len(fp_sids)
         FN = max(0, generated_count - TP)
 
-        # Precision / Recall / F1 (safe)
         precision = (TP / (TP + FP)) if (TP + FP) > 0 else 0.0
         recall = (TP / (TP + FN)) if (TP + FN) > 0 else 0.0
         f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
 
-        # Structural score from heuristics
         struct_score = structure_score_for_rule(rule_path)
-
-        # Noise penalty: fraction of detections that were FP among all matched_sids
         noise_ratio = (FP / (TP + FP)) if (TP + FP) > 0 else 0.0
 
-        # Composite scoring:
-        #  - 50% weight to detection quality (F1)
-        #  - 30% weight to noise-resistance (1 - noise_ratio)
-        #  - 20% weight to structural score normalized
         composite = (f1 * 100) * 0.5 + (1 - noise_ratio) * 100 * 0.3 + (struct_score) * 0.2
-        composite = clamp(round(composite), 0, 100)
+        composite = clamp(round(composite, 2), 0, 100)
+
+        # Apply transformation rule to composite to produce the reported score
+        transformed_score = transform_score(composite)
 
         # Reasoning summary
         reasoning = []
@@ -210,10 +201,10 @@ class Classifier:
         if noise_ratio > 0.1:
             reasoning.append("High false-positive rate against baseline/other synthetic logs -> rule likely noisy.")
 
-        # classification thresholds (tunable)
-        if composite >= 70 and precision >= 0.8 and recall >= 0.5:
+        # classification thresholds based on transformed_score
+        if transformed_score >= 70 and precision >= 0.8 and recall >= 0.5:
             grade = "STRONG"
-        elif composite >= 45:
+        elif transformed_score >= 45:
             grade = "NEUTRAL"
         else:
             grade = "WEAK"
@@ -232,7 +223,9 @@ class Classifier:
             "f1": round(f1, 3),
             "structure_score": struct_score,
             "noise_ratio": round(noise_ratio, 3),
-            "score": composite,
+            # store both raw composite and transformed score for transparency
+            "raw_score": composite,
+            "score": transformed_score,
             "classification": grade,
             "reasoning": " | ".join(reasoning),
             "timestamp": datetime.utcnow().isoformat() + "Z"
@@ -277,6 +270,7 @@ def main():
             res = cls.classify_rule(Path(rp))
             results.append(res)
 
+        # average should be average of transformed per-rule scores
         avg = sum(r["score"] for r in results) / len(results) if results else 0
         by_grade = {}
         for r in results:
@@ -298,4 +292,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
