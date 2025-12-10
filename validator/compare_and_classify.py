@@ -9,364 +9,274 @@ import argparse
 import json
 import yaml
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List
 from collections import defaultdict
 
 
 class DeltaBasedClassifier:
     """
     Simplified classifier that uses detection count deltas instead of rule ID matching
-    
+
     Logic:
     1. Baseline detections = running OLD rules only
     2. Current detections = running OLD + NEW rules
     3. Delta = Current - Baseline = contribution of new rules
     4. Classification based on delta magnitude
     """
-    
+
     def __init__(self, baseline_dir: Path, current_dir: Path, rules_dir: Path):
         self.baseline_dir = baseline_dir
         self.current_dir = current_dir
         self.rules_dir = rules_dir
-        
+
         # Load detection counts
         self.baseline_detections = self._load_detections(baseline_dir)
         self.current_detections = self._load_detections(current_dir)
-        
+
         # Calculate totals
         self.baseline_total = len(self.baseline_detections)
         self.current_total = len(self.current_detections)
         self.total_delta = self.current_total - self.baseline_total
-        
-        print(f"\n📊 DELTA-BASED DETECTION ANALYSIS:")
+
+        print("\n📊 DELTA-BASED DETECTION ANALYSIS:")
         print(f"   Baseline (old rules only): {self.baseline_total} detections")
         print(f"   Current (old + new rules): {self.current_total} detections")
         print(f"   Total Delta: {self.total_delta:+d} detections")
-        
+
         if self.total_delta > 0:
             print(f"   ✅ New rules added {self.total_delta} detections")
         elif self.total_delta == 0:
-            print(f"   ⚠️ No new detections from new rules")
+            print("   ⚠️ No new detections from new rules")
         else:
-            print(f"   ❌ Negative delta - something is wrong!")
-    
+            print("   ❌ Negative delta - something is wrong!")
+
     def _load_detections(self, results_dir: Path) -> List[Dict]:
         """Load detections from results directory"""
-        detections_file = results_dir / 'detections.json'
+        detections_file = results_dir / "detections.json"
         if detections_file.exists():
-            with open(detections_file, 'r') as f:
+            with open(detections_file, "r") as f:
                 data = json.load(f)
                 print(f"   Loaded {len(data)} detections from {detections_file}")
                 return data
         print(f"   ⚠️ No detections file found at {detections_file}")
         return []
-    
+
     def _extract_rule_info_from_yaml(self, rule_path: str) -> Dict[str, str]:
         """Extract rule ID and title from YAML file"""
-        result = {
-            'id': None,
-            'title': None,
-            'filename': Path(rule_path).stem
-        }
-        
+        result = {"id": None, "title": None, "filename": Path(rule_path).stem}
+
         try:
-            with open(rule_path, 'r') as f:
+            with open(rule_path, "r") as f:
                 rule_data = yaml.safe_load(f)
-                
+
                 if rule_data:
-                    if 'id' in rule_data:
-                        result['id'] = str(rule_data['id']).strip()
-                    
-                    if 'title' in rule_data:
-                        result['title'] = str(rule_data['title']).strip()
-                
+                    if "id" in rule_data:
+                        result["id"] = str(rule_data["id"]).strip()
+
+                    if "title" in rule_data:
+                        result["title"] = str(rule_data["title"]).strip()
+
         except Exception as e:
             print(f"   ⚠️ Error reading YAML: {e}")
-        
+
         return result
-    
+
     def classify_new_rules(self, new_rule_paths: List[str], total_new_rules: int) -> Dict:
-        """
-        Classify ALL new rules together based on total delta
-        
-        Since we can't distinguish individual rule contributions, we:
-        1. Calculate average delta per new rule
-        2. Apply same classification to all new rules
-        3. Provide clear reasoning about the approach
-        """
-        print(f"\n{'='*70}")
+        print("\n" + "=" * 70)
         print(f"🔍 CLASSIFYING {total_new_rules} NEW RULES")
-        print(f"{'='*70}")
-        
+        print("=" * 70)
+
         if total_new_rules == 0:
             print("   ⚠️ No new rules to classify")
             return {
-                'summary': {
-                    'total_rules': 0,
-                    'by_grade': {},
-                    'average_score': 0
-                },
-                'rules': []
+                "summary": {"total_rules": 0, "by_grade": {}, "average_score": 0},
+                "rules": [],
             }
-        
-        # Calculate average delta per rule
+
         avg_delta_per_rule = self.total_delta / total_new_rules
-        
-        print(f"\n   📊 Delta Analysis:")
+
+        print("\n   📊 Delta Analysis:")
         print(f"      Total delta: {self.total_delta}")
         print(f"      New rules: {total_new_rules}")
         print(f"      Avg delta per rule: {avg_delta_per_rule:.1f}")
-        
-        # Classify based on average delta
+
         score, grade, reasoning = self._classify_by_delta(avg_delta_per_rule, self.total_delta)
-        
+
         print(f"\n   🎯 Classification: {grade} (Score: {score}/100)")
         print(f"   📝 Reasoning: {reasoning}")
-        
-        # Build classification results for each rule
+
         classifications = []
-        
+
         for rule_path in new_rule_paths:
             rule_info = self._extract_rule_info_from_yaml(rule_path)
-            
+
             classification = {
-                'rule_name': rule_info['filename'],
-                'rule_path': rule_path,
-                'rule_id': rule_info['id'],
-                'rule_title': rule_info['title'],
-                'classification': grade,
-                'score': score,
-                'reasoning': reasoning,
-                'triggered': self.total_delta > 0,
-                'detection_count': round(avg_delta_per_rule),  # Estimated contribution
-                'metrics': {
-                    'baseline_total': self.baseline_total,
-                    'current_total': self.current_total,
-                    'total_delta': self.total_delta,
-                    'avg_delta_per_rule': round(avg_delta_per_rule, 2),
-                    'total_new_rules': total_new_rules
-                }
+                "rule_name": rule_info["filename"],
+                "rule_path": rule_path,
+                "rule_id": rule_info["id"],
+                "rule_title": rule_info["title"],
+                "classification": grade,
+                "score": score,
+                "reasoning": reasoning,
+                "triggered": self.total_delta > 0,
+                "detection_count": round(avg_delta_per_rule),
+                "metrics": {
+                    "baseline_total": self.baseline_total,
+                    "current_total": self.current_total,
+                    "total_delta": self.total_delta,
+                    "avg_delta_per_rule": round(avg_delta_per_rule, 2),
+                    "total_new_rules": total_new_rules,
+                },
             }
-            
+
             classifications.append(classification)
-            
+
             print(f"\n   📄 {rule_info['filename']}")
             print(f"      ID: {rule_info['id']}")
             print(f"      Title: {rule_info['title']}")
             print(f"      Estimated contribution: ~{round(avg_delta_per_rule)} detections")
-        
-        # Generate summary
+
         grade_counts = {grade: total_new_rules}
-        
+
         report = {
-            'summary': {
-                'total_rules': total_new_rules,
-                'by_grade': grade_counts,
-                'average_score': score,
-                'total_delta': self.total_delta,
-                'baseline_detections': self.baseline_total,
-                'current_detections': self.current_total,
-                'classification_method': 'delta_based'
+            "summary": {
+                "total_rules": total_new_rules,
+                "by_grade": grade_counts,
+                "average_score": score,
+                "total_delta": self.total_delta,
+                "baseline_detections": self.baseline_total,
+                "current_detections": self.current_total,
+                "classification_method": "delta_based",
             },
-            'rules': classifications
+            "rules": classifications,
         }
-        
+
         return report
-    
+
     def _classify_by_delta(self, avg_delta: float, total_delta: int) -> tuple:
-        """
-        Classify based on average delta per rule
-        
-        Returns: (score, grade, reasoning)
-        """
-        
-        # STRONG: Significant detection increase
         if avg_delta >= 50:
             return (
                 95,
-                'STRONG',
-                f'Excellent! New rules collectively added {total_delta} detections '
-                f'(~{avg_delta:.0f} per rule). Significant improvement in detection coverage.'
+                "STRONG",
+                f"Excellent! New rules added {total_delta} detections (~{avg_delta:.0f} per rule).",
             )
-        
-        elif avg_delta >= 30:
+
+        if avg_delta >= 30:
             return (
                 85,
-                'STRONG',
-                f'Strong performance! Added {total_delta} detections '
-                f'(~{avg_delta:.0f} per rule). Good contribution to detection capability.'
+                "STRONG",
+                f"Strong performance with {total_delta} detections (~{avg_delta:.0f} per rule).",
             )
-        
-        elif avg_delta >= 20:
+
+        if avg_delta >= 20:
             return (
                 75,
-                'STRONG',
-                f'Good detection increase: {total_delta} new detections '
-                f'(~{avg_delta:.0f} per rule). Solid value addition.'
+                "STRONG",
+                f"Good detection increase: {total_delta} detections (~{avg_delta:.0f} per rule).",
             )
-        
-        elif avg_delta >= 10:
+
+        if avg_delta >= 10:
             return (
                 65,
-                'STRONG',
-                f'Decent improvement: {total_delta} new detections '
-                f'(~{avg_delta:.0f} per rule). Rules are working correctly.'
+                "STRONG",
+                f"Decent improvement: {total_delta} detections (~{avg_delta:.0f} per rule).",
             )
-        
-        # NEUTRAL: Moderate detection increase
-        elif avg_delta >= 5:
+
+        if avg_delta >= 5:
             return (
                 55,
-                'NEUTRAL',
-                f'Moderate detection increase: {total_delta} new detections '
-                f'(~{avg_delta:.0f} per rule). Rules work but have limited coverage. '
-                f'Consider: (1) rules are very specific, or (2) test data lacks variety.'
+                "NEUTRAL",
+                f"Moderate increase: {total_delta} detections (~{avg_delta:.0f} per rule).",
             )
-        
-        elif avg_delta >= 2:
+
+        if avg_delta >= 2:
             return (
                 45,
-                'NEUTRAL',
-                f'Low detection increase: {total_delta} new detections '
-                f'(~{avg_delta:.0f} per rule). Rules triggered but with minimal impact. '
-                f'Review if patterns are too restrictive or test data is insufficient.'
+                "NEUTRAL",
+                f"Low detection increase: {total_delta} (~{avg_delta:.0f} per rule).",
             )
-        
-        # WEAK: Minimal or no detection increase
-        elif avg_delta >= 1:
+
+        if avg_delta >= 1:
             return (
                 35,
-                'WEAK',
-                f'Very low detection increase: {total_delta} detection(s) '
-                f'(~{avg_delta:.1f} per rule). Rules barely triggered. '
-                f'Likely causes: (1) unsupported log sources, (2) overly specific patterns, '
-                f'(3) syntax errors, or (4) insufficient test data.'
+                "WEAK",
+                f"Very low detection: {total_delta} detections (~{avg_delta:.1f} per rule).",
             )
-        
-        elif total_delta == 0:
+
+        if total_delta == 0:
             return (
                 20,
-                'WEAK',
-                f'No new detections! Rules did not trigger on any logs. '
-                f'Possible issues: (1) log source not supported by generator, '
-                f'(2) patterns are too restrictive, (3) field names incorrect, '
-                f'or (4) rule syntax errors. Run diagnose_rule.py to debug.'
+                "WEAK",
+                "No detections. Rule may not match logs / incorrect fields / too restrictive.",
             )
-        
-        else:  # Negative delta
-            return (
-                0,
-                'ERROR',
-                f'Negative delta ({total_delta})! Current detections are LESS than baseline. '
-                f'This indicates a serious problem: (1) rules conflict with existing detections, '
-                f'(2) rules break existing functionality, or (3) log generation failed.'
-            )
-    
-    def classify_individual_rule(self, rule_path: str) -> Dict:
-        """
-        Classify a single new rule (fallback for single-rule changes)
-        Uses same delta-based approach but provides clearer messaging
-        """
-        rule_info = self._extract_rule_info_from_yaml(rule_path)
-        
-        score, grade, reasoning = self._classify_by_delta(
-            float(self.total_delta), 
-            self.total_delta
+
+        return (
+            0,
+            "ERROR",
+            f"Negative delta ({total_delta}) → indicates broken rules, conflicts, or log generation failure.",
         )
-        
-        # Adjust reasoning for single rule
-        if self.total_delta > 0:
-            reasoning = reasoning.replace('Rules', 'Rule').replace('rules', 'rule')
-        
-        return {
-            'rule_name': rule_info['filename'],
-            'rule_path': rule_path,
-            'rule_id': rule_info['id'],
-            'rule_title': rule_info['title'],
-            'classification': grade,
-            'score': score,
-            'reasoning': reasoning,
-            'triggered': self.total_delta > 0,
-            'detection_count': self.total_delta,
-            'metrics': {
-                'baseline_total': self.baseline_total,
-                'current_total': self.current_total,
-                'delta': self.total_delta
-            }
-        }
 
 
 def parse_rule_list(rule_string: str) -> List[str]:
-    """Parse comma-separated rule list"""
-    if not rule_string or rule_string.strip() == '':
+    if not rule_string or rule_string.strip() == "":
         return []
-    return [r.strip() for r in rule_string.split(',') if r.strip()]
+    return [r.strip() for r in rule_string.split(",") if r.strip()]
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Delta-based classifier - compares total detection counts'
-    )
-    parser.add_argument('--baseline-results', required=True)
-    parser.add_argument('--current-results', required=True)
-    parser.add_argument('--rules-dir', default='rules/sigma')
-    parser.add_argument('--changed-sigma-rules', default='')
-    parser.add_argument('--changed-yara-rules', default='')
-    parser.add_argument('--output-file', required=True)
-    
+    parser = argparse.ArgumentParser(description="Delta-based classifier")
+    parser.add_argument("--baseline-results", required=True)
+    parser.add_argument("--current-results", required=True)
+    parser.add_argument("--rules-dir", default="rules/sigma")
+    parser.add_argument("--changed-sigma-rules", default="")
+    parser.add_argument("--changed-yara-rules", default="")
+    parser.add_argument("--output-file", required=True)
+
+    # ✅ PROPER debug support
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+
     args = parser.parse_args()
-    
+
+    if args.debug:
+        print("[DEBUG] Debug mode enabled for compare_and_classify.py")
+
     baseline_dir = Path(args.baseline_results)
     current_dir = Path(args.current_results)
     rules_dir = Path(args.rules_dir)
     output_file = Path(args.output_file)
-    
+
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    
+
     changed_sigma = parse_rule_list(args.changed_sigma_rules)
     changed_yara = parse_rule_list(args.changed_yara_rules)
     all_new_rules = changed_sigma + changed_yara
-    
+
     if not all_new_rules:
         print("⚠️ No changed rules to classify")
-        report = {
-            'summary': {
-                'total_rules': 0,
-                'by_grade': {},
-                'average_score': 0
-            },
-            'rules': []
-        }
+        report = {"summary": {"total_rules": 0, "by_grade": {}, "average_score": 0}, "rules": []}
     else:
         classifier = DeltaBasedClassifier(baseline_dir, current_dir, rules_dir)
         report = classifier.classify_new_rules(all_new_rules, len(all_new_rules))
-    
-    # Save report
-    with open(output_file, 'w') as f:
+
+    with open(output_file, "w") as f:
         json.dump(report, f, indent=2)
-    
-    print(f"\n{'='*70}")
+
+    print("\n" + "=" * 70)
     print("📊 FINAL SUMMARY")
-    print(f"{'='*70}")
+    print("=" * 70)
     print(f"Total rules: {report['summary']['total_rules']}")
     print(f"Average score: {report['summary']['average_score']}/100")
-    
-    by_grade = report['summary']['by_grade']
+
+    by_grade = report["summary"]["by_grade"]
     if by_grade:
-        print(f"\nGrade Distribution:")
-        for grade in ['STRONG', 'NEUTRAL', 'WEAK', 'ERROR']:
+        print("\nGrade Distribution:")
+        for grade in ["STRONG", "NEUTRAL", "WEAK", "ERROR"]:
             if grade in by_grade:
-                count = by_grade[grade]
-                print(f"   {grade}: {count}")
-    
+                print(f"   {grade}: {by_grade[grade]}")
+
     print(f"\n✅ Report saved to: {output_file}")
-    
-    print(f"\n💡 CLASSIFICATION METHOD:")
-    print(f"   Delta-based: Compares total detections (baseline vs current)")
-    print(f"   STRONG: Avg ≥10 detections per rule")
-    print(f"   NEUTRAL: Avg 2-9 detections per rule")
-    print(f"   WEAK: Avg 0-1 detections per rule")
+    print("\n💡 CLASSIFICATION METHOD: delta-based")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
