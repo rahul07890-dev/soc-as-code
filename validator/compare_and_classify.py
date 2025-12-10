@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-compare_and_classify.py (final)
+compare_and_classify.py (final, patched)
 
 Behavior:
 - Reads baseline/current detections (detections.json)
@@ -10,8 +10,7 @@ Behavior:
     composite = 0.5*(f1*100) + 0.3*(1-noise_ratio)*100 + 0.2*(structure_score)
 - Classification (grade EXCELLENT/GOOD/NEUTRAL/CONCERNING/BAD) is derived from RAW composite
 - For display only, `score` = transform_score(raw_score) where transform_score: if raw < 25 -> raw*4 else raw (clamped 0..100)
-- Output JSON contains both raw_score and score (transformed), detection_count, triggered, reasoning, timestamp
-- summary.average_score is average of transformed scores (keeps previous UX)
+- Output JSON contains both raw_score and score (transformed), detection_count (TP), total_detections, triggered (TP>0), reasoning, timestamp
 """
 
 import argparse
@@ -21,7 +20,6 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Dict, Any, List
 from datetime import datetime
-import math
 
 # ---------- helpers ----------
 def load_json(path: Path):
@@ -183,13 +181,14 @@ class Classifier:
                 except Exception:
                     pass
 
+            # We'll only attribute detections conservatively:
             if sid:
                 matched_sids.add(sid)
                 detections_for_rule.append(det)
             elif src_rid and str(src_rid) in {rid, name, title}:
                 detections_for_rule.append(det)
             else:
-                # conservative: do not attribute ambiguous detections
+                # ambiguous detection: ignore for per-rule attribution
                 pass
 
         # True Positives and False Positives (based on synthetic map)
@@ -230,11 +229,12 @@ class Classifier:
         # Transform for display only
         transformed_score = transform_score(composite)
 
-        # detection_count and triggered
-        detection_count = len(detections_for_rule)
-        triggered_flag = detection_count > 0 or (TP + FP) > 0
+        # detection_count should reflect TRUE POSITIVES for SOC clarity
+        detection_count_tp = TP
+        total_detections = len(detections_for_rule)
+        triggered_flag = TP > 0  # only true when actual true positives were observed
 
-        # Reasoning summary
+        # Reasoning summary (clearer)
         reasoning = []
         reasoning.append(f"Generated synthetic logs for rule: {generated_count}")
         reasoning.append(f"TP={TP}, FP={FP}, FN={FN}")
@@ -269,8 +269,9 @@ class Classifier:
             "classification": grade,     # grade based on composite
             "reasoning": " | ".join(reasoning),
             "timestamp": datetime.utcnow().isoformat() + "Z",
-            # new fields:
-            "detection_count": detection_count,
+            # SOC-friendly fields
+            "detection_count": detection_count_tp,
+            "total_detections": total_detections,
             "triggered": triggered_flag,
             # keep metrics for consumers
             "metrics": {
