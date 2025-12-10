@@ -123,9 +123,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     risk_level = get_risk_level(avg_score)
     
     print("\n🎯 FINAL NORMALIZED SCORE")
-    print(f"   Raw Average Score       : {avg_score}/100")
-    print(f"   Display Score (×4 mod 100): {display_score:.2f}")
-    print(f"   Risk Level (Based on Raw Score): {risk_level}")
+    print(f"   Score: {display_score:.2f}")
     print("\n" + "="*70)
 
 
@@ -244,4 +242,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
