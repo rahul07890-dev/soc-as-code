@@ -1,272 +1,120 @@
 #!/usr/bin/env python3
 """
-Generate human-readable summary report from classification results.
+generate_report.py - SOC-friendly markdown output.
 
-This version is robust: it will use the 'score' field from each rule in the report as the
-(transformed) score if present. If only raw_score or raw composite is present, it will
-recompute the transformed score using the same rule:
-    if raw < 25 -> transformed = raw * 4 (clamped to 100) else transformed = raw
-
-Grade distributions and per-rule classification are computed from the transformed scores.
+Prefers raw_score for classification and grading. Shows both raw and transformed values.
 """
-import os
-import sys
+
 import json
-import argparse
 from pathlib import Path
 from datetime import datetime
-from typing import Any
+import argparse
 
 def clamp(n, a=0, b=100):
+    try:
+        n = float(n)
+    except Exception:
+        return a
     return max(a, min(b, n))
 
-def normalize_to_percent(value: Any) -> float:
+def normalize(v):
     try:
-        v = float(value)
+        return float(v)
     except Exception:
         return 0.0
-    # Accept both 0..1 and 0..100
-    if v <= 1.0:
-        return v * 100.0
-    return v
 
-def transform_score(score: float) -> float:
-    try:
-        s = float(score)
-    except Exception:
-        s = 0.0
-    if s < 25.0:
-        s = s * 4.0
-    return clamp(round(s, 2), 0, 100)
-
-def classify_score(score_pct: float) -> str:
-    # Use the same thresholds as your report footer
-    if score_pct >= 80:
+def classify_from_raw(raw):
+    raw = clamp(raw)
+    if raw >= 75:
         return "EXCELLENT"
-    if score_pct >= 65:
+    if raw >= 60:
         return "GOOD"
-    if score_pct >= 45:
+    if raw >= 40:
         return "NEUTRAL"
-    if score_pct >= 30:
+    if raw >= 25:
         return "CONCERNING"
     return "BAD"
 
 def generate_markdown_report(classification_report: str, output_file: str):
-    with open(classification_report, 'r', encoding='utf-8') as f:
-        report = json.load(f)
+    j = json.loads(Path(classification_report).read_text(encoding='utf-8'))
+    summary = j.get('summary', {})
+    rules = j.get('rules', [])
 
-    summary = report.get('summary', {})
-    rules = report.get('rules', [])
-
-    # Process rules: ensure each rule has a transformed score and classification
-    processed_rules = []
+    processed = []
     transformed_scores = []
+    raw_scores = []
+
     for r in rules:
-        # Prefer 'score' (already transformed) if present
-        if "score" in r:
-            raw_trans = normalize_to_percent(r.get("score", 0))
-            transformed = transform_score(raw_trans)
-        else:
-            # fallback: use raw_score or raw composite (raw_score field name may vary)
-            if "raw_score" in r:
-                raw_val = normalize_to_percent(r.get("raw_score", 0))
-            else:
-                raw_val = normalize_to_percent(r.get("score", r.get("raw_score", 0)))
-            transformed = transform_score(raw_val)
-        transformed_scores.append(transformed)
-        # derive classification from transformed
-        classification = classify_score(transformed)
-        proc = dict(r)  # copy original
-        proc["transformed_score"] = transformed
-        proc["transformed_classification"] = classification
-        processed_rules.append(proc)
+        raw = r.get('raw_score')
+        if raw is None:
+            # fallback: try to infer raw from score if required
+            scr = r.get('score', 0)
+            raw = scr if scr >= 25 else scr / 4.0
+        raw = normalize(raw)
+        trans = normalize(r.get('score', 0))
+        transformed_scores.append(trans)
+        raw_scores.append(raw)
+        cls = classify_from_raw(raw)
+        r['_raw_score'] = raw
+        r['_transformed_score'] = trans
+        r['_class_from_raw'] = cls
+        processed.append(r)
 
-    total_rules = int(summary.get('total_rules', len(processed_rules)))
-    # If report summary average isn't transformed, recompute average from transformed_scores
-    avg_transformed = sum(transformed_scores) / len(transformed_scores) if transformed_scores else 0.0
+    total = len(processed)
+    avg_trans = sum(transformed_scores)/len(transformed_scores) if transformed_scores else 0.0
 
-    # Build by_grade distribution from transformed classifications
-    by_grade = {'EXCELLENT': 0, 'GOOD': 0, 'NEUTRAL': 0, 'CONCERNING': 0, 'BAD': 0}
-    for p in processed_rules:
-        g = p.get("transformed_classification")
-        if not g:
-            g = classify_score(p.get("transformed_score", 0))
-        by_grade[g] = by_grade.get(g, 0) + 1
+    by_grade = {"EXCELLENT":0,"GOOD":0,"NEUTRAL":0,"CONCERNING":0,"BAD":0}
+    for p in processed:
+        by_grade[p.get('_class_from_raw','BAD')] += 1
 
-    # Start building markdown
-    lines = []
-    lines.append("# 🛡️ Security Rule Quality Assessment Report")
+    lines=[]
+    lines.append("# 🛡️ Security Rule Quality Assessment")
     lines.append("")
     lines.append(f"**Generated:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append("## 📊 Executive Summary")
+    lines.append("## Summary")
     lines.append("")
-    lines.append(f"- **Total New Rules Analyzed:** {total_rules}")
-    # Show original average if present in summary (but ensure percent normalization), then show transformed average
-    raw_avg = summary.get('average_score', None)
-    if raw_avg is not None:
-        raw_avg_pct = normalize_to_percent(raw_avg)
-        lines.append(f"- **Average Quality Score:** {raw_avg_pct:.1f}/100 (Transformed: {avg_transformed:.1f}/100)")
-    else:
-        lines.append(f"- **Average Quality Score:** {avg_transformed:.1f}/100")
+    lines.append(f"- Total rules: {total}")
+    lines.append(f"- Average (display): {avg_trans:.2f}/100")
     lines.append("")
 
-    # Grade distribution
-    if any(v > 0 for v in by_grade.values()):
-        lines.append("### Grade Distribution")
-        lines.append("")
-        grade_info = {
-            'EXCELLENT': ('🌟', 'Exceptional quality - significantly improves detection'),
-            'GOOD': ('✅', 'Good quality - positive impact on detection'),
-            'NEUTRAL': ('➖', 'Neutral impact - no significant change'),
-            'CONCERNING': ('⚠️', 'Concerning - may have issues or conflicts'),
-            'BAD': ('❌', 'Poor quality - introduces problems')
-        }
-        for grade in ['EXCELLENT', 'GOOD', 'NEUTRAL', 'CONCERNING', 'BAD']:
-            count = by_grade.get(grade, 0)
-            if count:
-                icon, description = grade_info[grade]
-                lines.append(f"- {icon} **{grade}**: {count} rule(s) - *{description}*")
-        lines.append("")
-
-    # Recommendation section (based on transformed by_grade)
-    lines.append("### 🎯 Recommendation")
+    lines.append("### Grade distribution (from raw composite)")
     lines.append("")
-    bad_count = by_grade.get('BAD', 0)
-    concerning_count = by_grade.get('CONCERNING', 0)
-    good_count = by_grade.get('GOOD', 0) + by_grade.get('EXCELLENT', 0)
-    if bad_count > 0:
-        lines.append(f"⛔ **DO NOT MERGE** - {bad_count} rule(s) classified as BAD")
-        lines.append("")
-        lines.append("These rules negatively impact detection quality and should be revised or rejected.")
-    elif concerning_count > 0:
-        lines.append(f"⚠️ **REVIEW REQUIRED** - {concerning_count} rule(s) need attention")
-        lines.append("")
-        lines.append("Review the concerning rules before merging. They may need refinement.")
-    elif good_count == total_rules and total_rules > 0:
-        lines.append("✅ **APPROVED FOR MERGE** - All rules meet quality standards")
-        lines.append("")
-        lines.append("All new rules demonstrate positive or excellent detection capabilities.")
-    else:
-        lines.append("➖ **NEUTRAL** - Rules have minimal impact")
-        lines.append("")
-        lines.append("Rules may need more diverse test data or refinement to show value.")
+    for g in ["EXCELLENT","GOOD","NEUTRAL","CONCERNING","BAD"]:
+        if by_grade[g]:
+            lines.append(f"- {g}: {by_grade[g]} rule(s)")
     lines.append("")
     lines.append("---")
     lines.append("")
-
-    # Detailed Rule Analysis (use transformed values)
-    if processed_rules:
-        lines.append("## 📋 Detailed Rule Analysis")
+    if processed:
+        lines.append("## Detailed Results")
         lines.append("")
-        # sort by transformed_score desc
-        processed_rules.sort(key=lambda r: r.get("transformed_score", 0), reverse=True)
-        for i, r in enumerate(processed_rules, 1):
-            rule_name = r.get('rule_name', r.get('rule_path', 'Unknown'))
-            classification = r.get('transformed_classification', classify_score(r.get('transformed_score', 0)))
-            score = r.get('transformed_score', 0)
-            triggered = r.get('triggered', False)
-            detection_count = r.get('detection_count', 0)
-            rule_type = r.get('rule_type', 'unknown')
-            icon_map = {'EXCELLENT': '🌟','GOOD':'✅','NEUTRAL':'➖','CONCERNING':'⚠️','BAD':'❌'}
-            icon = icon_map.get(classification, '❓')
-            lines.append(f"### {i}. {icon} {rule_name}")
+        processed.sort(key=lambda x: x.get('_raw_score',0), reverse=True)
+        for i,r in enumerate(processed,1):
+            lines.append(f"### {i}. {r.get('rule_name')}")
             lines.append("")
-            lines.append(f"**Classification:** {classification} | **Score:** {score:.0f}/100 | **Type:** {rule_type.upper()}")
+            lines.append(f"- Raw score: {r.get('_raw_score'):.2f}/100")
+            lines.append(f"- Display score: {r.get('_transformed_score'):.2f}/100")
+            lines.append(f"- Classification (raw): {r.get('_class_from_raw')}")
+            lines.append(f"- Triggered (TP>0): {'Yes' if r.get('triggered') else 'No'}")
+            lines.append(f"- TP: {r.get('TP')} | FP: {r.get('FP')} | FN: {r.get('FN')}")
+            lines.append(f"- Detections (TP): {r.get('detection_count')} | Total detections: {r.get('total_detections')}")
             lines.append("")
-            lines.append("**Detection Performance:**")
-            lines.append(f"- Rule triggered: {'Yes ✓' if triggered else 'No ✗'}")
-            lines.append(f"- Detection count: {detection_count}")
-            lines.append("")
-            metrics = r.get('metrics', {})
-            if metrics:
-                lines.append("**Impact Analysis:**")
-                tp_delta = metrics.get('true_positive_delta', 0)
-                fp_delta = metrics.get('false_positive_delta', 0)
-                precision_delta = metrics.get('precision_delta', 0)
-                baseline_precision = metrics.get('baseline_precision', 0)
-                current_precision = metrics.get('current_precision', 0)
-                if tp_delta != 0:
-                    sign = '➕' if tp_delta > 0 else '➖'
-                    lines.append(f"- {sign} True Positives: {tp_delta:+d}")
-                if fp_delta != 0:
-                    sign = '➕' if fp_delta > 0 else '➖'
-                    lines.append(f"- {sign} False Positives: {fp_delta:+d}")
-                if precision_delta != 0:
-                    sign = '➕' if precision_delta > 0 else '➖'
-                    lines.append(f"- {sign} Precision Change: {precision_delta:+.2%}")
-                lines.append(f"- Baseline Precision: {baseline_precision:.2%}")
-                lines.append(f"- Current Precision: {current_precision:.2%}")
-                lines.append("")
-            reasoning = r.get('reasoning', 'No reasoning provided')
-            lines.append("**Assessment:**")
-            lines.append(f"> {reasoning}")
-            lines.append("")
-            rule_path = r.get('rule_path', 'N/A')
-            lines.append(f"*File: `{rule_path}`*")
+            lines.append("**Reasoning:**")
+            lines.append(f"> {r.get('reasoning')}")
             lines.append("")
             lines.append("---")
             lines.append("")
 
-    # Footer
-    lines.append("## 📚 Understanding the Scores")
-    lines.append("")
-    lines.append("### Score Breakdown (0-100 scale)")
-    lines.append("")
-    lines.append("- **Base Score:** 50 points")
-    lines.append("- **True Positive Detection:** +10 points per detection (max +40)")
-    lines.append("- **False Positive Generation:** -10 points per false positive (max -30)")
-    lines.append("- **Precision Improvement:** +20 points for >10% improvement")
-    lines.append("- **Precision Degradation:** -20 points for >10% degradation")
-    lines.append("")
-    lines.append("### Grade Thresholds")
-    lines.append("")
-    lines.append("- **EXCELLENT:** 80-100 points")
-    lines.append("- **GOOD:** 65-79 points")
-    lines.append("- **NEUTRAL:** 45-64 points")
-    lines.append("- **CONCERNING:** 30-44 points")
-    lines.append("- **BAD:** 0-29 points")
-    lines.append("")
+    Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_file).write_text("\n".join(lines), encoding='utf-8')
+    print(f"[+] Wrote markdown -> {output_file}")
 
-    # Write to file
-    output_path = Path(output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
-
-    print(f"[+] Generated markdown report: {output_path}")
-
-    # Console summary: print only final transformed average score
-    print("\n" + "="*70)
-    print("REPORT SUMMARY")
-    print("="*70)
-    print(f"Total rules: {total_rules}")
-    print(f"Average score: {avg_transformed:.1f} / 100")
-    print("\nGrade distribution:")
-    for grade, count in by_grade.items():
-        if count:
-            print(f"  {grade}: {count}")
-    print("="*70)
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Generate human-readable summary report from classification results')
-    parser.add_argument('--classification-report', required=True, help='Path to classification report JSON file')
-    parser.add_argument('--output-file', required=True, help='Output markdown file path')
+if __name__=='__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--classification-report', required=True)
+    parser.add_argument('--output-file', required=True)
     args = parser.parse_args()
-
-    try:
-        generate_markdown_report(args.classification_report, args.output_file)
-        print("\n✅ Report generation completed successfully")
-        sys.exit(0)
-    except Exception as e:
-        print(f"\n❌ Error generating report: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-
-if __name__ == '__main__':
-    main()
-
+    generate_markdown_report(args.classification_report, args.output_file)
