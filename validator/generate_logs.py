@@ -82,12 +82,14 @@ def generate_synthetic_logs(rules_dir: str, output_dir: str, log_count: int = 10
             # -------------------------------
             # 🚨 FIX: DO NOT GENERATE LOGS FOR NEW RULES
             # -------------------------------
-            # generate new-rule logs only if include_new flag set
-            if is_new_rule(rule_id) and not args.include_new:
-                print(f"        → New rule detected. Synthetic logs disabled (use --include-new to override).")
+            if is_new_rule(rule_id):
+                print(f"        → New rule detected. Synthetic logs disabled.")
                 logs = []
             else:
-                logs = EnhancedLogGenerator.generate_for_sigma_rule(rule, count=rule_log_count)
+                logs = EnhancedLogGenerator.generate_for_sigma_rule(
+                    rule, count=rule_log_count
+                )
+
             # Tag (only if logs exist)
             for log in logs:
                 log["_source_rule_id"] = rule_id
@@ -148,7 +150,7 @@ def main():
     parser.add_argument("--rules-dir", required=True, help="Directory containing Sigma rules")
     parser.add_argument("--output-dir", required=True, help="Output directory for synthetic logs")
     parser.add_argument("--log-count", type=int, default=100, help="Total logs to generate")
-    parser.add_argument("--include-new", action="store_true",help="When set, generate logs for rules that are marked as NEW (override default skip)")
+
     args = parser.parse_args()
 
     try:
@@ -164,4 +166,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
