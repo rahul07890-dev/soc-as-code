@@ -66,7 +66,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     by_grade = summary.get('by_grade', {})
     
     print(f"\nTotal new rules analyzed: {total_rules}")
-    print(f"Average quality score: {avg_score}/100")
+    print(f"Average quality score: {(avg_score * 4 % 100) / 100}")
     
     if by_grade:
         print("\nGrade Distribution:")
@@ -242,6 +242,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
