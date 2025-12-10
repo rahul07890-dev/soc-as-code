@@ -1,0 +1,14 @@
+title: Neutral Rule - Rare File Path Execution
+id: SIG-90044
+status: experimental
+description: Execution of binaries from atypical paths used in narrow-scope tests (very low occurrence).
+logsource:
+  product: windows
+detection:
+  selection:
+    EventID: 4688
+    NewProcessName|contains: '\Temp\TestArtifacts\'
+  condition: selection
+falsepositives:
+  - developer/tester runs
+level: low
