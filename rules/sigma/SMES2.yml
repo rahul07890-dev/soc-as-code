@@ -1,0 +1,16 @@
+title: Neutral Rule - SYSTEM Malicious Execution (strict)
+id: SIG-90040-strict
+status: experimental
+description: Strict variant requiring SYSTEM account and uncommon parent process to reduce false positives.
+logsource:
+  product: windows
+detection:
+  selection:
+    EventID: 4688
+    CommandLine|contains: 'malicious'
+    User: 'SYSTEM'
+    ParentImage|not_contains: '\services.exe'
+  condition: selection
+falsepositives:
+  - system automated tasks
+level: high
