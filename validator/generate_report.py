@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-generate_report.py - SOC-friendly markdown output.
-
-Prefers raw_score for classification and grading. Shows both raw and transformed values.
+generate_report.py - SOC-friendly markdown report using raw_score for grading.
 """
-
 import json
 from pathlib import Path
 from datetime import datetime
@@ -16,12 +13,6 @@ def clamp(n, a=0, b=100):
     except Exception:
         return a
     return max(a, min(b, n))
-
-def normalize(v):
-    try:
-        return float(v)
-    except Exception:
-        return 0.0
 
 def classify_from_raw(raw):
     raw = clamp(raw)
@@ -41,19 +32,15 @@ def generate_markdown_report(classification_report: str, output_file: str):
     rules = j.get('rules', [])
 
     processed = []
-    transformed_scores = []
-    raw_scores = []
-
+    trans_scores = []
     for r in rules:
         raw = r.get('raw_score')
         if raw is None:
-            # fallback: try to infer raw from score if required
-            scr = r.get('score', 0)
-            raw = scr if scr >= 25 else scr / 4.0
-        raw = normalize(raw)
-        trans = normalize(r.get('score', 0))
-        transformed_scores.append(trans)
-        raw_scores.append(raw)
+            sc = r.get('score', 0)
+            raw = sc if sc >= 25 else sc / 4.0
+        raw = float(raw)
+        trans = float(r.get('score', 0))
+        trans_scores.append(trans)
         cls = classify_from_raw(raw)
         r['_raw_score'] = raw
         r['_transformed_score'] = trans
@@ -61,7 +48,7 @@ def generate_markdown_report(classification_report: str, output_file: str):
         processed.append(r)
 
     total = len(processed)
-    avg_trans = sum(transformed_scores)/len(transformed_scores) if transformed_scores else 0.0
+    avg_trans = sum(trans_scores)/len(trans_scores) if trans_scores else 0.0
 
     by_grade = {"EXCELLENT":0,"GOOD":0,"NEUTRAL":0,"CONCERNING":0,"BAD":0}
     for p in processed:
@@ -79,7 +66,6 @@ def generate_markdown_report(classification_report: str, output_file: str):
     lines.append(f"- Total rules: {total}")
     lines.append(f"- Average (display): {avg_trans:.2f}/100")
     lines.append("")
-
     lines.append("### Grade distribution (from raw composite)")
     lines.append("")
     for g in ["EXCELLENT","GOOD","NEUTRAL","CONCERNING","BAD"]:
