@@ -8,11 +8,6 @@ recompute the transformed score using the same rule:
     if raw < 25 -> transformed = raw * 4 (clamped to 100) else transformed = raw
 
 Grade distributions and per-rule classification are computed from the transformed scores.
-
-Updated grading system:
-  - <50 -> WEAK
-  - 50-79 -> NEUTRAL
-  - 80-100 -> STRONG
 """
 import os
 import sys
@@ -45,19 +40,16 @@ def transform_score(score: float) -> float:
     return clamp(round(s, 2), 0, 100)
 
 def classify_score(score_pct: float) -> str:
-    # New thresholds:
-    #   >=80 -> STRONG
-    #   >=50 -> NEUTRAL
-    #   <50  -> WEAK
-    try:
-        s = float(score_pct)
-    except Exception:
-        s = 0.0
-    if s >= 80:
-        return "STRONG"
-    if s >= 50:
+    # Use the same thresholds as your report footer
+    if score_pct >= 80:
+        return "EXCELLENT"
+    if score_pct >= 65:
+        return "GOOD"
+    if score_pct >= 45:
         return "NEUTRAL"
-    return "WEAK"
+    if score_pct >= 30:
+        return "CONCERNING"
+    return "BAD"
 
 def generate_markdown_report(classification_report: str, output_file: str):
     with open(classification_report, 'r', encoding='utf-8') as f:
@@ -94,7 +86,7 @@ def generate_markdown_report(classification_report: str, output_file: str):
     avg_transformed = sum(transformed_scores) / len(transformed_scores) if transformed_scores else 0.0
 
     # Build by_grade distribution from transformed classifications
-    by_grade = {'STRONG': 0, 'NEUTRAL': 0, 'WEAK': 0}
+    by_grade = {'EXCELLENT': 0, 'GOOD': 0, 'NEUTRAL': 0, 'CONCERNING': 0, 'BAD': 0}
     for p in processed_rules:
         g = p.get("transformed_classification")
         if not g:
@@ -126,11 +118,13 @@ def generate_markdown_report(classification_report: str, output_file: str):
         lines.append("### Grade Distribution")
         lines.append("")
         grade_info = {
-            'STRONG': ('✅', 'Strong detection quality'),
-            'NEUTRAL': ('➖', 'Neutral / needs improvement'),
-            'WEAK': ('❌', 'Weak — likely to introduce noise or miss detections')
+            'EXCELLENT': ('🌟', 'Exceptional quality - significantly improves detection'),
+            'GOOD': ('✅', 'Good quality - positive impact on detection'),
+            'NEUTRAL': ('➖', 'Neutral impact - no significant change'),
+            'CONCERNING': ('⚠️', 'Concerning - may have issues or conflicts'),
+            'BAD': ('❌', 'Poor quality - introduces problems')
         }
-        for grade in ['STRONG', 'NEUTRAL', 'WEAK']:
+        for grade in ['EXCELLENT', 'GOOD', 'NEUTRAL', 'CONCERNING', 'BAD']:
             count = by_grade.get(grade, 0)
             if count:
                 icon, description = grade_info[grade]
@@ -140,25 +134,25 @@ def generate_markdown_report(classification_report: str, output_file: str):
     # Recommendation section (based on transformed by_grade)
     lines.append("### 🎯 Recommendation")
     lines.append("")
-    weak_count = by_grade.get('WEAK', 0)
-    neutral_count = by_grade.get('NEUTRAL', 0)
-    strong_count = by_grade.get('STRONG', 0)
-    if weak_count > 0:
-        lines.append(f"⛔ **DO NOT MERGE** - {weak_count} rule(s) classified as WEAK")
+    bad_count = by_grade.get('BAD', 0)
+    concerning_count = by_grade.get('CONCERNING', 0)
+    good_count = by_grade.get('GOOD', 0) + by_grade.get('EXCELLENT', 0)
+    if bad_count > 0:
+        lines.append(f"⛔ **DO NOT MERGE** - {bad_count} rule(s) classified as BAD")
         lines.append("")
         lines.append("These rules negatively impact detection quality and should be revised or rejected.")
-    elif neutral_count > 0 and strong_count == 0:
-        lines.append(f"⚠️ **REVIEW REQUIRED** - {neutral_count} rule(s) need attention")
+    elif concerning_count > 0:
+        lines.append(f"⚠️ **REVIEW REQUIRED** - {concerning_count} rule(s) need attention")
         lines.append("")
-        lines.append("Review the neutral rules before merging. They may need refinement.")
-    elif strong_count == total_rules and total_rules > 0:
-        lines.append("✅ **APPROVED FOR MERGE** - All rules classified as STRONG")
+        lines.append("Review the concerning rules before merging. They may need refinement.")
+    elif good_count == total_rules and total_rules > 0:
+        lines.append("✅ **APPROVED FOR MERGE** - All rules meet quality standards")
         lines.append("")
-        lines.append("All new rules demonstrate strong detection capabilities.")
+        lines.append("All new rules demonstrate positive or excellent detection capabilities.")
     else:
-        lines.append("➖ **MIXED** - Some rules are STRONG, others NEUTRAL/WEAK")
+        lines.append("➖ **NEUTRAL** - Rules have minimal impact")
         lines.append("")
-        lines.append("Consider fixing the WEAK rules and re-running validation.")
+        lines.append("Rules may need more diverse test data or refinement to show value.")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -176,7 +170,7 @@ def generate_markdown_report(classification_report: str, output_file: str):
             triggered = r.get('triggered', False)
             detection_count = r.get('detection_count', 0)
             rule_type = r.get('rule_type', 'unknown')
-            icon_map = {'STRONG': '✅','NEUTRAL':'➖','WEAK':'❌'}
+            icon_map = {'EXCELLENT': '🌟','GOOD':'✅','NEUTRAL':'➖','CONCERNING':'⚠️','BAD':'❌'}
             icon = icon_map.get(classification, '❓')
             lines.append(f"### {i}. {icon} {rule_name}")
             lines.append("")
@@ -229,9 +223,11 @@ def generate_markdown_report(classification_report: str, output_file: str):
     lines.append("")
     lines.append("### Grade Thresholds")
     lines.append("")
-    lines.append("- **STRONG:** 80-100 points")
-    lines.append("- **NEUTRAL:** 50-79 points")
-    lines.append("- **WEAK:** 0-49 points")
+    lines.append("- **EXCELLENT:** 80-100 points")
+    lines.append("- **GOOD:** 65-79 points")
+    lines.append("- **NEUTRAL:** 45-64 points")
+    lines.append("- **CONCERNING:** 30-44 points")
+    lines.append("- **BAD:** 0-29 points")
     lines.append("")
 
     # Write to file
