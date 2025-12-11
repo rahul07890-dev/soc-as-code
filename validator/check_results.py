@@ -8,7 +8,7 @@ Behavior:
 - Displays the raw average (percent) in the summary (e.g. "13.00 (13/100)").
 - Applies transform: if value < 25 -> value * 4, else leave as-is (clamped to 100).
   - Final normalized score and rule classifications are based on the transformed values.
-- Keeps icons for the grade distribution only. No icons printed next to individual rules.
+- Uses grade buckets: WEAK (<50), NEUTRAL (50-79.99), STRONG (>=80)
 """
 import os
 import sys
@@ -57,26 +57,20 @@ def get_risk_level(score: float) -> str:
 
 
 def get_classification_from_score(score_percent: float) -> str:
-    """Map a numeric score percentage (0-100) to a classification grade."""
+    """Map a numeric score percentage (0-100) to a classification grade (WEAK/NEUTRAL/STRONG)."""
     if score_percent >= 80:
-        return "EXCELLENT"
-    elif score_percent >= 65:
-        return "GOOD"
-    elif score_percent >= 45:
+        return "STRONG"
+    elif score_percent >= 50:
         return "NEUTRAL"
-    elif score_percent >= 30:
-        return "CONCERNING"
     else:
-        return "BAD"
+        return "WEAK"
 
 
 def get_grade_icon(grade: str) -> str:
     icons = {
-        'EXCELLENT': '🌟',
-        'GOOD': '✅',
+        'STRONG': '💪',
         'NEUTRAL': '➖',
-        'CONCERNING': '⚠️',
-        'BAD': '❌'
+        'WEAK': '⚠️'
     }
     return icons.get(grade, '')
 
@@ -133,7 +127,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     provided_by_grade = summary.get('by_grade', {}) or {}
 
     # If rules exist, recompute per-rule transformed classifications to ensure consistency
-    computed_by_grade = {'EXCELLENT': 0, 'GOOD': 0, 'NEUTRAL': 0, 'CONCERNING': 0, 'BAD': 0}
+    computed_by_grade = {'STRONG': 0, 'NEUTRAL': 0, 'WEAK': 0}
     processed_rules = []
 
     for rule in rules:
@@ -141,10 +135,8 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
         # Prefer 'score' field (already transformed by classifier). If absent, normalize and transform.
         if 'score' in rule:
             score_val = normalize_to_percent(rule.get('score', 0))
-            # the report's 'score' may already be transformed; still apply transform to be safe (idempotent)
             transformed = transform_score(score_val)
         else:
-            # maybe report contains raw_score or raw composite; try to fall back
             raw_score = rule.get('raw_score', rule.get('raw', rule.get('composite', 0)))
             raw_pct = normalize_to_percent(raw_score)
             transformed = transform_score(raw_pct)
@@ -175,12 +167,12 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
 
     if by_grade:
         print("\nGrade Distribution:")
-        grade_order = ['EXCELLENT', 'GOOD', 'NEUTRAL', 'CONCERNING', 'BAD']
+        grade_order = ['STRONG', 'NEUTRAL', 'WEAK']
         for grade in grade_order:
             cnt = by_grade.get(grade, 0)
             if cnt:
                 icon = get_grade_icon(grade)
-                print(f"  {icon} {grade:12} : {cnt} rule(s)")
+                print(f"  {icon} {grade:8} : {cnt} rule(s)")
 
     # Detailed rule classifications (sorted by transformed score desc)
     if processed_rules:
@@ -225,24 +217,26 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
     print("\n" + "=" * 70)
 
     # Pass/fail logic based on by_grade
-    bad_rules = by_grade.get('BAD', 0)
-    concerning_rules = by_grade.get('CONCERNING', 0)
+    weak_rules = by_grade.get('WEAK', 0)
+    neutral_rules = by_grade.get('NEUTRAL', 0)
+    strong_rules = by_grade.get('STRONG', 0)
 
     if fail_on_bad_rules:
-        if bad_rules > 0:
-            print(f"\nVALIDATION FAILED — {bad_rules} BAD rule(s)")
+        # treat any WEAK rules as fail if user requested strict
+        if weak_rules > 0:
+            print(f"\nVALIDATION FAILED — {weak_rules} WEAK rule(s)")
             sys.exit(1)
-        elif concerning_rules > 0:
-            print(f"\nVALIDATION PASSED WITH WARNINGS — {concerning_rules} concerning rule(s)")
+        elif neutral_rules > 0:
+            print(f"\nVALIDATION PASSED WITH WARNINGS — {neutral_rules} NEUTRAL rule(s)")
             sys.exit(0)
         else:
             print(f"\nVALIDATION PASSED — All rules meet quality standard")
             sys.exit(0)
 
     else:
-        if bad_rules > 0 or concerning_rules > 0:
+        if weak_rules > 0 or neutral_rules > 0:
             print(f"\nQUALITY CONCERNS DETECTED")
-            print(f"   BAD: {bad_rules} | CONCERNING: {concerning_rules}")
+            print(f"   WEAK: {weak_rules} | NEUTRAL: {neutral_rules} | STRONG: {strong_rules}")
         else:
             print(f"\nALL RULES MEET QUALITY STANDARDS")
 
