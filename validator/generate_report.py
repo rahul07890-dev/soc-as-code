@@ -2,12 +2,12 @@
 """
 Generate human-readable summary report from classification results.
 
-This version uses the grade buckets:
-- WEAK: <50
-- NEUTRAL: 50-79.99
-- STRONG: >=80
+This version is robust: it will use the 'score' field from each rule in the report as the
+(transformed) score if present. If only raw_score or raw composite is present, it will
+recompute the transformed score using the same rule:
+    if raw < 25 -> transformed = raw * 4 (clamped to 100) else transformed = raw
 
-It prefers the 'score' (transformed) field if present; otherwise it transforms raw_score/raw composite.
+Grade distributions and per-rule classification are computed from the transformed scores.
 """
 import os
 import sys
@@ -39,8 +39,11 @@ def transform_score(score: float) -> float:
         s = s * 4.0
     return clamp(round(s, 2), 0, 100)
 
-def classify_score_user_buckets(score_pct: float) -> str:
-    # User-requested buckets: <50 weak, 50-80 neutral, 80-100 strong
+def classify_score(score_pct: float) -> str:
+    # NEW grading system:
+    # <50 -> WEAK
+    # 50-79.999... -> NEUTRAL
+    # >=80 -> STRONG
     if score_pct >= 80:
         return "STRONG"
     if score_pct >= 50:
@@ -70,8 +73,8 @@ def generate_markdown_report(classification_report: str, output_file: str):
                 raw_val = normalize_to_percent(r.get("score", r.get("raw_score", 0)))
             transformed = transform_score(raw_val)
         transformed_scores.append(transformed)
-        # derive classification from transformed using user buckets
-        classification = classify_score_user_buckets(transformed)
+        # derive classification from transformed
+        classification = classify_score(transformed)
         proc = dict(r)  # copy original
         proc["transformed_score"] = transformed
         proc["transformed_classification"] = classification
@@ -84,9 +87,9 @@ def generate_markdown_report(classification_report: str, output_file: str):
     # Build by_grade distribution from transformed classifications
     by_grade = {'STRONG': 0, 'NEUTRAL': 0, 'WEAK': 0}
     for p in processed_rules:
-        g = p.get('transformed_classification')
+        g = p.get("transformed_classification")
         if not g:
-            g = classify_score_user_buckets(p.get('transformed_score', 0))
+            g = classify_score(p.get("transformed_score", 0))
         by_grade[g] = by_grade.get(g, 0) + 1
 
     # Start building markdown
@@ -114,9 +117,9 @@ def generate_markdown_report(classification_report: str, output_file: str):
         lines.append("### Grade Distribution")
         lines.append("")
         grade_info = {
-            'STRONG': ('💪', 'Strong - high confidence and good quality'),
-            'NEUTRAL': ('➖', 'Neutral - acceptable but may need tuning'),
-            'WEAK': ('⚠️', 'Weak - requires revision')
+            'STRONG': ('🌟', 'Strong quality - useful and reliable detection'),
+            'NEUTRAL': ('➖', 'Neutral impact - may need refinement'),
+            'WEAK': ('❌', 'Weak - likely noisy or ineffective')
         }
         for grade in ['STRONG', 'NEUTRAL', 'WEAK']:
             count = by_grade.get(grade, 0)
@@ -132,20 +135,21 @@ def generate_markdown_report(classification_report: str, output_file: str):
     neutral_count = by_grade.get('NEUTRAL', 0)
     strong_count = by_grade.get('STRONG', 0)
     if weak_count > 0:
-        lines.append(f"⛔ **REVISIONS REQUIRED** - {weak_count} rule(s) classified as WEAK")
+        lines.append(f"⛔ **DO NOT MERGE** - {weak_count} rule(s) classified as WEAK")
         lines.append("")
-        lines.append("These rules should be revised before merging.")
+        lines.append("These rules negatively impact detection quality and should be revised or rejected.")
     elif neutral_count > 0 and strong_count == 0:
-        lines.append(f"⚠️ **REVIEW ADVISED** - {neutral_count} NEUTRAL rule(s)")
+        lines.append(f"⚠️ **REVIEW REQUIRED** - {neutral_count} rule(s) are NEUTRAL")
         lines.append("")
-        lines.append("Review and, if possible, add more tests or refine detections.")
+        lines.append("Review the neutral rules before merging. They may need refinement.")
     elif strong_count == total_rules and total_rules > 0:
         lines.append("✅ **APPROVED FOR MERGE** - All rules are STRONG")
         lines.append("")
-        lines.append("Rules show strong detection capability.")
+        lines.append("All new rules demonstrate strong detection capabilities.")
     else:
-        lines.append("➖ **MIXED** - Some rules are STRONG, others may need follow-up")
+        lines.append("➖ **MIXED** - Some rules are STRONG/NEUTRAL; review WEAK entries if present.")
         lines.append("")
+        lines.append("Rules may need more diverse test data or refinement to show value.")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -158,12 +162,12 @@ def generate_markdown_report(classification_report: str, output_file: str):
         processed_rules.sort(key=lambda r: r.get("transformed_score", 0), reverse=True)
         for i, r in enumerate(processed_rules, 1):
             rule_name = r.get('rule_name', r.get('rule_path', 'Unknown'))
-            classification = r.get('transformed_classification', classify_score_user_buckets(r.get('transformed_score', 0)))
+            classification = r.get('transformed_classification', classify_score(r.get('transformed_score', 0)))
             score = r.get('transformed_score', 0)
             triggered = r.get('triggered', False)
             detection_count = r.get('detection_count', 0)
             rule_type = r.get('rule_type', 'unknown')
-            icon_map = {'STRONG': '💪','NEUTRAL':'➖','WEAK':'⚠️'}
+            icon_map = {'STRONG': '🌟','NEUTRAL':'➖','WEAK':'❌'}
             icon = icon_map.get(classification, '❓')
             lines.append(f"### {i}. {icon} {rule_name}")
             lines.append("")
@@ -206,7 +210,15 @@ def generate_markdown_report(classification_report: str, output_file: str):
     # Footer
     lines.append("## 📚 Understanding the Scores")
     lines.append("")
-    lines.append("### Grade Thresholds (user-configured)")
+    lines.append("### Score Breakdown (0-100 scale)")
+    lines.append("")
+    lines.append("- **Base Score:** 50 points")
+    lines.append("- **True Positive Detection:** +10 points per detection (max +40)")
+    lines.append("- **False Positive Generation:** -10 points per false positive (max -30)")
+    lines.append("- **Precision Improvement:** +20 points for >10% improvement")
+    lines.append("- **Precision Degradation:** -20 points for >10% degradation")
+    lines.append("")
+    lines.append("### Grade Thresholds")
     lines.append("")
     lines.append("- **STRONG:** 80-100 points")
     lines.append("- **NEUTRAL:** 50-79 points")
