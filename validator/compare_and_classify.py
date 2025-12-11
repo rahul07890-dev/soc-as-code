@@ -9,8 +9,8 @@ compare_and_classify.py (improved)
 - Composite score computed (0-100). THEN apply transformation:
     if composite < 25 -> transformed = composite * 4 (clamped to 100)
     else -> transformed = composite
-- Classification (STRONG / NEUTRAL / WEAK) uses transformed score with thresholds:
-    WEAK: <50, NEUTRAL: 50-79.99, STRONG: >=80
+- Classification (STRONG / NEUTRAL / WEAK) uses transformed score.
+- Writes classification report with transformed per-rule scores and average_score (average of transformed scores).
 """
 import argparse
 import json
@@ -201,7 +201,8 @@ class Classifier:
         if noise_ratio > 0.1:
             reasoning.append("High false-positive rate against baseline/other synthetic logs -> rule likely noisy.")
 
-        # classification thresholds based on transformed_score using user-specified buckets
+        # classification thresholds based on transformed_score
+        # NEW GRADING: <50 => WEAK, 50-79.999 => NEUTRAL, >=80 => STRONG
         if transformed_score >= 80:
             grade = "STRONG"
         elif transformed_score >= 50:
