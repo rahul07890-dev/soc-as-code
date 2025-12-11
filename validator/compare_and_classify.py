@@ -208,13 +208,9 @@ class Classifier:
             reasoning.append("High false-positive rate against baseline/other synthetic logs -> rule likely noisy.")
 
         # classification thresholds based on transformed_score
-        # New grading system:
-        #   - < 50 -> WEAK
-        #   - 50-79.99 -> NEUTRAL
-        #   - >=80 -> STRONG
-        if transformed_score >= 80:
+        if transformed_score >= 70 and precision >= 0.8 and recall >= 0.5:
             grade = "STRONG"
-        elif transformed_score >= 50:
+        elif transformed_score >= 45:
             grade = "NEUTRAL"
         else:
             grade = "WEAK"
