@@ -30,6 +30,7 @@ def load_json(path: Path):
     except Exception:
         return []
 
+
 def load_synthetic_logs(path: Path) -> List[Dict[str,Any]]:
     logs = []
     if not path.exists():
@@ -45,6 +46,7 @@ def load_synthetic_logs(path: Path) -> List[Dict[str,Any]]:
                 continue
     return logs
 
+
 def extract_rule_identifiers_from_yaml(path: Path) -> Dict[str,str]:
     res = {"id": None, "title": None, "filename": path.stem}
     try:
@@ -56,8 +58,10 @@ def extract_rule_identifiers_from_yaml(path: Path) -> Dict[str,str]:
         pass
     return res
 
+
 def clamp(n, a=0, b=100):
     return max(a, min(b, n))
+
 
 def structure_score_for_rule(rule_path: Path) -> int:
     try:
@@ -86,6 +90,7 @@ def structure_score_for_rule(rule_path: Path) -> int:
     score += min(20, field_count * 3)
     return clamp(score, 0, 100)
 
+
 def transform_score(score: float) -> float:
     """Apply transformation rule: if score < 25 -> score*4 else score. Clamp to 100."""
     try:
@@ -95,6 +100,7 @@ def transform_score(score: float) -> float:
     if s < 25.0:
         s = s * 4.0
     return clamp(round(s, 2), 0, 100)
+
 
 # ---------- main classifier ----------
 class Classifier:
@@ -202,7 +208,10 @@ class Classifier:
             reasoning.append("High false-positive rate against baseline/other synthetic logs -> rule likely noisy.")
 
         # classification thresholds based on transformed_score
-        # NEW GRADING: <50 => WEAK, 50-79.999 => NEUTRAL, >=80 => STRONG
+        # New grading system:
+        #   - < 50 -> WEAK
+        #   - 50-79.99 -> NEUTRAL
+        #   - >=80 -> STRONG
         if transformed_score >= 80:
             grade = "STRONG"
         elif transformed_score >= 50:
