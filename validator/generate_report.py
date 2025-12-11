@@ -8,6 +8,11 @@ recompute the transformed score using the same rule:
     if raw < 25 -> transformed = raw * 4 (clamped to 100) else transformed = raw
 
 Grade distributions and per-rule classification are computed from the transformed scores.
+
+Updated grading system:
+  - <50 -> WEAK
+  - 50-79 -> NEUTRAL
+  - 80-100 -> STRONG
 """
 import os
 import sys
@@ -40,13 +45,17 @@ def transform_score(score: float) -> float:
     return clamp(round(s, 2), 0, 100)
 
 def classify_score(score_pct: float) -> str:
-    # NEW grading system:
-    # <50 -> WEAK
-    # 50-79.999... -> NEUTRAL
-    # >=80 -> STRONG
-    if score_pct >= 80:
+    # New thresholds:
+    #   >=80 -> STRONG
+    #   >=50 -> NEUTRAL
+    #   <50  -> WEAK
+    try:
+        s = float(score_pct)
+    except Exception:
+        s = 0.0
+    if s >= 80:
         return "STRONG"
-    if score_pct >= 50:
+    if s >= 50:
         return "NEUTRAL"
     return "WEAK"
 
@@ -117,9 +126,9 @@ def generate_markdown_report(classification_report: str, output_file: str):
         lines.append("### Grade Distribution")
         lines.append("")
         grade_info = {
-            'STRONG': ('🌟', 'Strong quality - useful and reliable detection'),
-            'NEUTRAL': ('➖', 'Neutral impact - may need refinement'),
-            'WEAK': ('❌', 'Weak - likely noisy or ineffective')
+            'STRONG': ('✅', 'Strong detection quality'),
+            'NEUTRAL': ('➖', 'Neutral / needs improvement'),
+            'WEAK': ('❌', 'Weak — likely to introduce noise or miss detections')
         }
         for grade in ['STRONG', 'NEUTRAL', 'WEAK']:
             count = by_grade.get(grade, 0)
@@ -139,17 +148,17 @@ def generate_markdown_report(classification_report: str, output_file: str):
         lines.append("")
         lines.append("These rules negatively impact detection quality and should be revised or rejected.")
     elif neutral_count > 0 and strong_count == 0:
-        lines.append(f"⚠️ **REVIEW REQUIRED** - {neutral_count} rule(s) are NEUTRAL")
+        lines.append(f"⚠️ **REVIEW REQUIRED** - {neutral_count} rule(s) need attention")
         lines.append("")
         lines.append("Review the neutral rules before merging. They may need refinement.")
     elif strong_count == total_rules and total_rules > 0:
-        lines.append("✅ **APPROVED FOR MERGE** - All rules are STRONG")
+        lines.append("✅ **APPROVED FOR MERGE** - All rules classified as STRONG")
         lines.append("")
         lines.append("All new rules demonstrate strong detection capabilities.")
     else:
-        lines.append("➖ **MIXED** - Some rules are STRONG/NEUTRAL; review WEAK entries if present.")
+        lines.append("➖ **MIXED** - Some rules are STRONG, others NEUTRAL/WEAK")
         lines.append("")
-        lines.append("Rules may need more diverse test data or refinement to show value.")
+        lines.append("Consider fixing the WEAK rules and re-running validation.")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -167,7 +176,7 @@ def generate_markdown_report(classification_report: str, output_file: str):
             triggered = r.get('triggered', False)
             detection_count = r.get('detection_count', 0)
             rule_type = r.get('rule_type', 'unknown')
-            icon_map = {'STRONG': '🌟','NEUTRAL':'➖','WEAK':'❌'}
+            icon_map = {'STRONG': '✅','NEUTRAL':'➖','WEAK':'❌'}
             icon = icon_map.get(classification, '❓')
             lines.append(f"### {i}. {icon} {rule_name}")
             lines.append("")
