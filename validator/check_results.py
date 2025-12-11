@@ -59,14 +59,19 @@ def get_risk_level(score: float) -> str:
 def get_classification_from_score(score_percent: float) -> str:
     """Map a numeric score percentage (0-100) to a classification grade.
 
-    NEW GRADE SYSTEM:
-      <50 -> WEAK
-      50-79.999... -> NEUTRAL
-      >=80 -> STRONG
+    New requested mapping:
+      - < 50  => WEAK
+      - 50-79 => NEUTRAL
+      - >=80  => STRONG
     """
-    if score_percent >= 80:
+    try:
+        s = float(score_percent)
+    except Exception:
+        s = 0.0
+
+    if s >= 80.0:
         return "STRONG"
-    elif score_percent >= 50:
+    elif s >= 50.0:
         return "NEUTRAL"
     else:
         return "WEAK"
@@ -74,7 +79,7 @@ def get_classification_from_score(score_percent: float) -> str:
 
 def get_grade_icon(grade: str) -> str:
     icons = {
-        'STRONG': '🌟',
+        'STRONG': '✅',
         'NEUTRAL': '➖',
         'WEAK': '❌'
     }
@@ -180,7 +185,7 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
             cnt = by_grade.get(grade, 0)
             if cnt:
                 icon = get_grade_icon(grade)
-                print(f"  {icon} {grade:8} : {cnt} rule(s)")
+                print(f"  {icon} {grade:12} : {cnt} rule(s)")
 
     # Detailed rule classifications (sorted by transformed score desc)
     if processed_rules:
@@ -226,19 +231,23 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
 
     # Pass/fail logic based on by_grade
     weak_rules = by_grade.get('WEAK', 0)
+    neutral_rules = by_grade.get('NEUTRAL', 0)
 
     if fail_on_bad_rules:
         if weak_rules > 0:
             print(f"\nVALIDATION FAILED — {weak_rules} WEAK rule(s)")
             sys.exit(1)
+        elif neutral_rules > 0:
+            print(f"\nVALIDATION PASSED WITH WARNINGS — {neutral_rules} neutral rule(s)")
+            sys.exit(0)
         else:
             print(f"\nVALIDATION PASSED — All rules meet quality standard")
             sys.exit(0)
 
     else:
-        if weak_rules > 0:
+        if weak_rules > 0 or neutral_rules > 0:
             print(f"\nQUALITY CONCERNS DETECTED")
-            print(f"   WEAK: {weak_rules}")
+            print(f"   WEAK: {weak_rules} | NEUTRAL: {neutral_rules}")
         else:
             print(f"\nALL RULES MEET QUALITY STANDARDS")
 
