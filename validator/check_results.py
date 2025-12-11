@@ -192,7 +192,6 @@ def check_classification_report(report_file: str, fail_on_bad_rules: bool):
         for r in processed_rules:
             print(f"\n{r['rule_name']}")
             print(f"   Classification: {r['classification']} (Score: {r['score']:.0f}/100)")
-            print(f"   Triggered: {'Yes' if r['triggered'] else 'No'} | Detections: {r['detection_count']}")
             if r.get('metrics'):
                 tp_delta = r['metrics'].get('true_positive_delta', 0)
                 fp_delta = r['metrics'].get('false_positive_delta', 0)
@@ -328,4 +327,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
