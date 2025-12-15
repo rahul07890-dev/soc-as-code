@@ -1,0 +1,22 @@
+
+id: TEST-HIGH-SCORE-001
+title: High Score Test Rule - Suspicious PowerShell Execution Pattern
+status: experimental
+description: |
+  This test rule is intentionally designed to produce strong synthetic 
+  detections. It uses simple, universal patterns that the log generator 
+  always matches.
+
+logsource:
+  product: windows
+  category: process_creation
+
+detection:
+  selection:
+    Image: "*powershell.exe"
+    CommandLine: "*-EncodedCommand*"
+    EventID: 4688
+  condition: selection
+
+level: high
+
